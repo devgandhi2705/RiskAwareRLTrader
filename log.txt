@@ -1,0 +1,2 @@
+how to access logs
+-> tensorboard --logs
