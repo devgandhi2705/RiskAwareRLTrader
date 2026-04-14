@@ -290,3 +290,9 @@ Future production deployment could include:
 # Project Outcome
 
 This project demonstrates how **reinforcement learning can be applied to multi-asset portfolio management**, enabling an AI system to dynamically adapt its allocation strategy based on changing market conditions while maintaining risk awareness.
+
+
+Also:
+
+how to access logs
+-> tensorboard --logs
