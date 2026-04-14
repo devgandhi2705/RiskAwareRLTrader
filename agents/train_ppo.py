@@ -1,21 +1,23 @@
 """
-train_ppo.py  (v3 — Regime-Aware)
------------------------------------
-Trains PPO (baseline) and Safe PPO agents with regime-aware environment.
+train_ppo.py  (v4 — Alpha-Aware Training Config)
+-------------------------------------------------
+Trains PPO (baseline) and Safe PPO agents with the v6 regime-aware environment.
 
-Changes from v2
+Changes from v3
 ---------------
-  R1 : regime features injected into DataFrame before environment creation
-       via detect_market_regime() — all windows share the same enriched df.
-  R7 : EpisodeStatsCallback now logs regime counts to TensorBoard.
-  Backward-compatible: safe_reward=False → standard PPO reward.
+  T1 : TIMESTEPS_PER_WINDOW increased 150 000 → 250 000  (Section 8)
+  T2 : Fine-tune floor raised  10 000 → 50 000           (Section 8)
+  T3 : ENT_COEF reduced 0.02 → 0.003                    (Section 8)
+  T4 : Guard added: skip detect_market_regime() when regime
+       columns already exist in the CSV (avoids double computation).
 
-Retained from v2
+Retained from v3
 ----------------
-  S6  : norm_obs=True, norm_reward=False
-  S12 : lr=1e-4, ent=0.02, clip=0.1
-  S13 : walk-forward training (5 windows) + full fine-tune
-  S17 : random_start=True during training
+  Walk-forward training (5 windows) + full fine-tune
+  norm_obs=True, norm_reward=False, clip_obs=10.0
+  lr=1e-4, clip_range=0.1, n_steps=2048, batch=64, epochs=10
+  random_start=True during all training windows
+  All callbacks (RewardLogger, EpisodeStatsCallback, DebugRewardCallback)
 
 Part of: Safe RL for Risk-Constrained Portfolio Management
 """
@@ -53,8 +55,9 @@ N_EPOCHS             = 10
 GAMMA                = 0.99
 GAE_LAMBDA           = 0.95
 CLIP_RANGE           = 0.1
-ENT_COEF             = 0.02
-TIMESTEPS_PER_WINDOW = 150_000
+ENT_COEF             = 0.003          # T3: reduced from 0.02 → stabilises policy
+TIMESTEPS_PER_WINDOW = 250_000        # T1: increased from 150 000
+MIN_FINE_TUNE_STEPS  = 50_000         # T2: increased from 10 000
 
 WALK_FORWARD_WINDOWS = [
     ("2016-01-01", "2017-12-31", "2018-12-31"),
@@ -84,11 +87,8 @@ class RewardLogger(BaseCallback):
 
 
 class DebugRewardCallback(BaseCallback):
-    """
-    R7: Logs full reward component breakdown for the first N_DEBUG_EPISODES.
-    Uses env.get_episode_debug_log() which includes all regime + metric info.
-    Active for both PPO and Safe PPO when safe_reward=True.
-    """
+    """Logs reward component breakdown for the first N_DEBUG_EPISODES."""
+
     N_DEBUG_EPISODES = 5
 
     def __init__(self, verbose=0):
@@ -98,23 +98,18 @@ class DebugRewardCallback(BaseCallback):
     def _on_step(self):
         if self.locals["dones"][0] and self._ep_count < self.N_DEBUG_EPISODES:
             try:
-                # Unwrap VecEnv → Monitor → PortfolioTradingEnv
-                env = self.training_env.envs[0].env
+                env = self.training_env.envs[0].env   # VecEnv → Monitor → Env
                 log = env.get_episode_debug_log()
                 if log:
                     print(f"  [DEBUG ep {self._ep_count + 1}] {log}")
             except Exception:
-                pass   # silently skip if env unwrapping fails
+                pass
             self._ep_count += 1
         return True
 
 
 class EpisodeStatsCallback(BaseCallback):
-    """
-    R7: Logs per-episode environment stats to TensorBoard.
-    Tracks: avg_turnover, avg_drawdown, avg_volatility, final_portfolio_value,
-            and per-regime step counts.
-    """
+    """Logs per-episode environment stats to TensorBoard."""
 
     def __init__(self, verbose=0):
         super().__init__(verbose)
@@ -152,22 +147,31 @@ class EpisodeStatsCallback(BaseCallback):
         return True
 
 
-# ── Environment factory ───────────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _load_and_prepare(path: str) -> pd.DataFrame:
+    """
+    Load training CSV and attach regime features.
+
+    T4: If regime probability columns are already present (built by
+    build_dataset.py), skip detect_market_regime() to avoid redundant
+    computation. Otherwise attach them now.
+    """
+    df = pd.read_csv(path, index_col="Date", parse_dates=True)
+    if "BTC_bull_prob" in df.columns:
+        return df
+    return detect_market_regime(df)
+
 
 def _make_env_fn(df: pd.DataFrame, safe: bool, random_start: bool = True):
-    """Return a thunk that creates a monitored PortfolioTradingEnv."""
     def _fn():
         env = PortfolioTradingEnv(df, safe_reward=safe, random_start=random_start)
         return Monitor(env)
     return _fn
 
 
-def _build_vecenv(
-    df: pd.DataFrame,
-    safe: bool,
-    random_start: bool = True,
-) -> VecNormalize:
-    """Wrap df in DummyVecEnv + VecNormalize (obs normalised, reward not)."""
+def _build_vecenv(df: pd.DataFrame, safe: bool, random_start: bool = True) -> VecNormalize:
+    """Wrap df in DummyVecEnv + VecNormalize (obs normalised, reward raw)."""
     vec = DummyVecEnv([_make_env_fn(df, safe, random_start)])
     vec = VecNormalize(
         vec,
@@ -179,23 +183,13 @@ def _build_vecenv(
     return vec
 
 
-def _evaluate_on_window(
-    model: PPO,
-    vecnorm: VecNormalize,
-    df_val: pd.DataFrame,
-) -> float:
-    """
-    Run one deterministic episode on a validation slice.
-
-    Returns
-    -------
-    Total net return of the episode as a fraction of initial value.
-    """
+def _evaluate_on_window(model: PPO, vecnorm: VecNormalize, df_val: pd.DataFrame) -> float:
+    """Run one deterministic episode; return fractional net return."""
     env_val = PortfolioTradingEnv(df_val, safe_reward=False, random_start=False)
     obs, _  = env_val.reset()
     done    = False
     while not done:
-        obs_n = vecnorm.normalize_obs(obs.reshape(1, -1))[0]
+        obs_n     = vecnorm.normalize_obs(obs.reshape(1, -1))[0]
         action, _ = model.predict(obs_n, deterministic=True)
         obs, _, done, trunc, _ = env_val.step(action)
         done = done or trunc
@@ -208,18 +202,13 @@ def train_ppo(safe_reward: bool = False):
     """
     Train PPO / Safe PPO with walk-forward validation + full fine-tune.
 
-    Regime features are attached to the DataFrame once before any environment
-    is created, so every window and the final fine-tune share the same enriched
-    multi-asset regime columns.
-
     Parameters
     ----------
     safe_reward : If True, trains Safe PPO (CVaR / tail penalties active).
-                  If False, trains standard PPO baseline.
 
     Returns
     -------
-    (best_model, full_vecnorm)  or  (None, None) if no window had data.
+    (best_model, full_vecnorm) or (None, None).
     """
     os.makedirs(MODEL_DIR,   exist_ok=True)
     os.makedirs(RESULTS_DIR, exist_ok=True)
@@ -231,12 +220,10 @@ def train_ppo(safe_reward: bool = False):
     vecnorm_path = os.path.join(MODEL_DIR, f"{model_name}_vecnorm.pkl")
 
     print("=" * 60)
-    print(f"  {label} — WALK-FORWARD TRAINING (Regime-Aware v3)")
+    print(f"  {label} — WALK-FORWARD TRAINING (v4)")
     print("=" * 60)
 
-    # R1: Load CSV and attach regime features ONCE to the full dataset
-    raw_df  = pd.read_csv(TRAIN_DATA_PATH, index_col="Date", parse_dates=True)
-    full_df = detect_market_regime(raw_df)
+    full_df = _load_and_prepare(TRAIN_DATA_PATH)
 
     stats = get_regime_stats(full_df)
     print(
@@ -249,13 +236,17 @@ def train_ppo(safe_reward: bool = False):
         f"Neutral: {stats.get('neutral_pct', 0):.1f}%  "
         f"Bear: {stats.get('bear_pct', 0):.1f}%"
     )
+    print(
+        f"Config — ent_coef={ENT_COEF}  "
+        f"steps_per_window={TIMESTEPS_PER_WINDOW:,}  "
+        f"min_fine_tune={MIN_FINE_TUNE_STEPS:,}"
+    )
 
     best_val_return = -np.inf
     best_model      = None
     best_vecnorm    = None
     all_rewards     = []
 
-    # ── Walk-forward loop (S13) ───────────────────────────────────────────────
     for i, (tr_start, tr_end, val_end) in enumerate(WALK_FORWARD_WINDOWS):
         print(
             f"\n  Window {i+1}/{len(WALK_FORWARD_WINDOWS)} | "
@@ -266,10 +257,9 @@ def train_ppo(safe_reward: bool = False):
         df_val   = full_df.loc[tr_end:val_end].copy()
 
         if len(df_train) < 100 or len(df_val) < 20:
-            print("    Skipping — insufficient data for this window.")
+            print("    Skipping — insufficient data.")
             continue
 
-        # R7: per-window regime distribution
         ws = get_regime_stats(df_train)
         print(
             f"    Window regimes — "
@@ -310,7 +300,6 @@ def train_ppo(safe_reward: bool = False):
         )
         all_rewards.extend(reward_cb.episode_rewards)
 
-        # Evaluate on validation window
         vec_env.training    = False
         vec_env.norm_reward = False
         val_ret = _evaluate_on_window(model, vec_env, df_val)
@@ -320,38 +309,37 @@ def train_ppo(safe_reward: bool = False):
             best_val_return = val_ret
             best_model      = model
             best_vecnorm    = vec_env
-            print("    → New best model saved.")
+            print("    → New best model.")
 
     if best_model is None:
-        print("No model trained successfully — all windows had insufficient data.")
+        print("No model trained — all windows had insufficient data.")
         return None, None
 
-    print(f"\n  Best validation return across all windows: {best_val_return * 100:+.2f}%")
+    print(f"\n  Best validation return: {best_val_return * 100:+.2f}%")
 
-    # ── Fine-tune best model on the full training dataset ─────────────────────
-    print("\n  Fine-tuning best model on full training data …")
+    # Fine-tune on full dataset
+    print("\n  Fine-tuning on full training data …")
     full_vec = _build_vecenv(full_df, safe=safe_reward, random_start=True)
     best_model.set_env(full_vec)
 
+    remaining = TOTAL_TIMESTEPS - (TIMESTEPS_PER_WINDOW * len(WALK_FORWARD_WINDOWS))
+    fine_steps = max(remaining, MIN_FINE_TUNE_STEPS)   # T2: floor at 50 000
+
     fine_reward_cb = RewardLogger()
     fine_stats_cb  = EpisodeStatsCallback()
-
-    remaining_steps = TOTAL_TIMESTEPS - (TIMESTEPS_PER_WINDOW * len(WALK_FORWARD_WINDOWS))
     best_model.learn(
-        total_timesteps   = max(remaining_steps, 10_000),
-        callback          = CallbackList([fine_reward_cb, fine_stats_cb]),
-        progress_bar      = True,
+        total_timesteps     = fine_steps,
+        callback            = CallbackList([fine_reward_cb, fine_stats_cb]),
+        progress_bar        = True,
         reset_num_timesteps = False,
     )
     all_rewards.extend(fine_reward_cb.episode_rewards)
 
-    # ── Persist model and normaliser ──────────────────────────────────────────
     best_model.save(model_path)
     full_vec.save(vecnorm_path)
-    print(f"Model saved          → {model_path}.zip")
-    print(f"VecNormalize saved   → {vecnorm_path}")
+    print(f"Model saved        → {model_path}.zip")
+    print(f"VecNormalize saved → {vecnorm_path}")
 
-    # ── Training curve plot ────────────────────────────────────────────────────
     if all_rewards:
         _plot_curve(
             all_rewards,
@@ -363,21 +351,16 @@ def train_ppo(safe_reward: bool = False):
     return best_model, full_vec
 
 
-# ── Plotting helper ────────────────────────────────────────────────────────────
+# ── Plotting ───────────────────────────────────────────────────────────────────
 
 def _plot_curve(rewards: list, title: str, save_path: str) -> None:
-    """Save a smoothed episode-reward training curve."""
     fig, ax = plt.subplots(figsize=(10, 4))
     ax.plot(rewards, alpha=0.25, color="darkorange", label="Episode reward")
     if len(rewards) >= 10:
         window = max(10, len(rewards) // 20)
         smooth = pd.Series(rewards).rolling(window, min_periods=1).mean()
-        ax.plot(
-            smooth,
-            color="darkorange",
-            linewidth=2,
-            label=f"Rolling mean ({window} ep)",
-        )
+        ax.plot(smooth, color="darkorange", linewidth=2,
+                label=f"Rolling mean ({window} ep)")
     ax.set_title(title, fontsize=13, fontweight="bold")
     ax.set_xlabel("Episode")
     ax.set_ylabel("Total Reward")
