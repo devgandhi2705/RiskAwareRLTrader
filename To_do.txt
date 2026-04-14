@@ -1,3 +1,3 @@
 1. Analysis of all 3 Policy training & their evaluation. Summary doc of all 3 policy performance in different regime & situations. 
 2. Create a virtual scenario to test the Agent on how it perform. Like UI & how actual traders will be able to see. Just a small & simple visual look. 
-3. Send RL Summary Doc, GitHub link, evaluation metrics & analysis(1), models zip files mail
+3. Send RL Summary Doc(Update again), GitHub link(add final commit with deleting not required files), evaluation metrics & analysis(in doc with tables & images), models zip files & dataset mail

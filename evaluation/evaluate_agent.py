@@ -171,8 +171,7 @@ def run_rl_episode(agent_key, cfg, df):
     if cfg["algo"] == "DQN":
         at_path = os.path.join(MODEL_DIR, "dqn_action_table.npy")
         if not os.path.isfile(at_path):
-            print(f"  ! Action table missing — re-run train_dqn.py")
-            return None
+            raise FileNotFoundError(f"Action table missing — re-run train_dqn.py")
         env = DiscretePortfolioWrapper(base_env, np.load(at_path))
     else:
         env = base_env
@@ -363,7 +362,7 @@ def plot_regime_performance(all_results, df, save_path):
         ax.set_xticks(x); ax.set_xticklabels(regime_names)
         ax.axhline(0, color="black", linewidth=0.5)
         ax.grid(True, axis="y", alpha=0.3)
-        if j == 0:
+        if agents:
             ax.legend(fontsize=7)
 
     handles, labels = axes[0].get_legend_handles_labels()

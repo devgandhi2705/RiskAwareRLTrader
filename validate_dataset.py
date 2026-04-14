@@ -9,17 +9,20 @@ Checks performed
   1.  File existence
   2.  File is non-empty and readable
   3.  DatetimeIndex integrity (parseable, named 'Date', sorted, no duplicates)
-  4.  Date-range coverage (train 2018–2022, test 2023–2024)
+  4.  Date-range coverage (train 2016–2022, test 2023–2024, strict matching)
   5.  No unexpected overlap between train and test
   6.  Expected column schema (all OHLCV + indicator columns present)
   7.  Numeric dtype enforcement
-  8.  NaN audit (per-column and per-row summary)
+  8.  NaN audit (per-column and per-row summary, thresholds: PASS<10%, WARN 10-20%, FAIL>20%)
   9.  OHLCV sanity checks (High ≥ Low, Close within [Low, High], Volume ≥ 0)
-  10. Return sanity (no extreme outliers suggesting calculation errors)
-  11. RSI bounds (0 ≤ RSI ≤ 100)
-  12. MA20 / Volatility presence and sign checks
-  13. Cross-split consistency (same columns, compatible value ranges)
-  14. Row-count plausibility
+ 10.  Price sanity (Close > 0)
+ 11.  Return sanity (no extreme outliers suggesting calculation errors)
+ 12.  RSI bounds (0 ≤ RSI ≤ 100)
+ 13.  MA / Volatility presence and sign checks (MA20, MA50, MA200 > 0, Volatility ≥ 0)
+ 14.  Regime feature validation (trend_strength finite, volatility ≥ 0, regime in {-1,0,1}, probs in [0,1] and sum ≈ 1)
+ 15.  Feature variance checks (Return, trend_strength, volatility columns have std > 1e-8)
+ 16.  Cross-split consistency (same columns, compatible value ranges)
+ 17.  Row-count plausibility
 
 Usage
 -----
@@ -51,7 +54,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_TRAIN_PATH = os.path.join("data", "train_dataset.csv")
 DEFAULT_TEST_PATH  = os.path.join("data", "test_dataset.csv")
 
-TRAIN_EXPECTED_START = "2018-01-01"
+TRAIN_EXPECTED_START = "2016-01-01"
 TRAIN_EXPECTED_END   = "2022-12-31"
 TEST_EXPECTED_START  = "2023-01-01"
 TEST_EXPECTED_END    = "2024-12-31"
@@ -63,7 +66,7 @@ ASSET_UNIVERSE = ["BTC", "ETH", "SPY", "GLD", "Silver", "Nifty50", "Sensex"]
 REQUIRED_FIELDS_ALL = ["Open", "High", "Low", "Close", "Volume", "Return", "RSI"]
 
 # Fields that should exist for most assets (warn if missing, don't hard-fail)
-OPTIONAL_FIELDS     = ["MA20", "Volatility"]
+OPTIONAL_FIELDS     = ["MA20", "MA50", "MA200", "Volatility"]
 
 # Plausible row counts (trading days in range ± buffer for weekends/holidays)
 TRAIN_MIN_ROWS = 1000
@@ -148,20 +151,19 @@ def check_date_range(
     exp_s        = pd.Timestamp(expected_start).date()
     exp_e        = pd.Timestamp(expected_end).date()
 
-    # Start within 30 days of expected (some assets may not open on Jan 1)
-    start_ok = abs((actual_start - exp_s).days) <= 30
+    # Strict matching: actual must equal expected
+    start_ok = actual_start == exp_s
     record(
-        f"{label} start date ≈ {expected_start}",
+        f"{label} start date == {expected_start}",
         start_ok,
-        f"Actual start: {actual_start}  (expected ≈ {exp_s})",
+        f"Actual start: {actual_start}  (expected: {exp_s})",
     )
 
-    # End within 30 days of expected
-    end_ok = abs((actual_end - exp_e).days) <= 30
+    end_ok = actual_end == exp_e
     record(
-        f"{label} end date ≈ {expected_end}",
+        f"{label} end date == {expected_end}",
         end_ok,
-        f"Actual end: {actual_end}  (expected ≈ {exp_e})",
+        f"Actual end: {actual_end}  (expected: {exp_e})",
     )
 
 
@@ -239,19 +241,27 @@ def check_nan_audit(df: pd.DataFrame, label: str) -> None:
     total_nan      = int(df.isna().sum().sum())
     nan_pct        = (total_nan / total_cells * 100) if total_cells else 0.0
 
-    # Overall NaN rate — soft threshold: warn above 10%, fail above 30%
-    passed = nan_pct < 30.0
-    record(
-        f"{label} overall NaN rate < 30%",
-        passed,
-        f"{nan_pct:.2f}%  ({total_nan:,} / {total_cells:,} cells)",
-    )
-    if nan_pct >= 10.0:
+    # Overall NaN rate — PASS <10%, WARN 10-20%, FAIL >20%
+    if nan_pct < 10.0:
+        passed = True
+        msg = f"PASS: {nan_pct:.2f}% NaN"
+    elif nan_pct <= 20.0:
+        passed = True  # Still pass but warn
+        msg = f"WARN: {nan_pct:.2f}% NaN (10-20% range)"
         logger.warning(
-            "  [~] %-45s NaN rate %.2f%% exceeds 10%% — consider investigating.",
+            "  [~] %-45s NaN rate %.2f%% in warning range — monitor closely.",
             f"{label} NaN advisory",
             nan_pct,
         )
+    else:
+        passed = False
+        msg = f"FAIL: {nan_pct:.2f}% NaN (>20%)"
+
+    record(
+        f"{label} NaN rate validation",
+        passed,
+        f"{msg}  ({total_nan:,} / {total_cells:,} cells)",
+    )
 
     # Columns with > 50% NaN
     high_nan_cols = df.columns[df.isna().mean() > 0.50].tolist()
@@ -317,6 +327,20 @@ def check_ohlcv_sanity(df: pd.DataFrame, label: str) -> None:
             )
 
 
+def check_price_sanity(df: pd.DataFrame, label: str) -> None:
+    for asset in ASSET_UNIVERSE:
+        c_col = f"{asset}_Close"
+        if c_col not in df.columns:
+            continue
+
+        invalid_prices = int((df[c_col].dropna() <= 0).sum())
+        record(
+            f"{label} {asset} Close > 0",
+            invalid_prices == 0,
+            "OK" if invalid_prices == 0 else f"{invalid_prices} non-positive close prices",
+        )
+
+
 def check_returns(df: pd.DataFrame, label: str) -> None:
     for asset in ASSET_UNIVERSE:
         ret_col = f"{asset}_Return"
@@ -366,16 +390,19 @@ def check_rsi_bounds(df: pd.DataFrame, label: str) -> None:
 
 def check_ma_and_volatility(df: pd.DataFrame, label: str) -> None:
     for asset in ASSET_UNIVERSE:
-        ma_col  = f"{asset}_MA20"
+        ma20_col = f"{asset}_MA20"
+        ma50_col = f"{asset}_MA50"
+        ma200_col = f"{asset}_MA200"
         vol_col = f"{asset}_Volatility"
 
-        if ma_col in df.columns:
-            neg_ma = int((df[ma_col].dropna() <= 0).sum())
-            record(
-                f"{label} {asset} MA20 > 0",
-                neg_ma == 0,
-                "OK" if neg_ma == 0 else f"{neg_ma} non-positive MA20 values",
-            )
+        for ma_col, ma_name in [(ma20_col, "MA20"), (ma50_col, "MA50"), (ma200_col, "MA200")]:
+            if ma_col in df.columns:
+                neg_ma = int((df[ma_col].dropna() <= 0).sum())
+                record(
+                    f"{label} {asset} {ma_name} > 0",
+                    neg_ma == 0,
+                    "OK" if neg_ma == 0 else f"{neg_ma} non-positive {ma_name} values",
+                )
 
         if vol_col in df.columns:
             neg_vol = int((df[vol_col].dropna() < 0).sum())
@@ -383,6 +410,76 @@ def check_ma_and_volatility(df: pd.DataFrame, label: str) -> None:
                 f"{label} {asset} Volatility ≥ 0",
                 neg_vol == 0,
                 "OK" if neg_vol == 0 else f"{neg_vol} negative volatility values",
+            )
+
+
+def check_regime_features(df: pd.DataFrame, label: str) -> None:
+    for asset in ASSET_UNIVERSE:
+        trend_col = f"{asset}_trend_strength"
+        vol_col   = f"{asset}_volatility"
+        reg_col   = f"{asset}_regime"
+        bull_col  = f"{asset}_bull_prob"
+        neut_col  = f"{asset}_neutral_prob"
+        bear_col  = f"{asset}_bear_prob"
+
+        # Check trend_strength is finite
+        if trend_col in df.columns:
+            invalid_trend = int(~np.isfinite(df[trend_col].dropna()).all())
+            record(
+                f"{label} {asset} trend_strength finite",
+                invalid_trend == 0,
+                "OK" if invalid_trend == 0 else f"Non-finite trend_strength values",
+            )
+
+        # Check volatility >= 0
+        if vol_col in df.columns:
+            neg_vol = int((df[vol_col].dropna() < 0).sum())
+            record(
+                f"{label} {asset} volatility ≥ 0",
+                neg_vol == 0,
+                "OK" if neg_vol == 0 else f"{neg_vol} negative volatility values",
+            )
+
+        # Check regime in {-1, 0, 1}
+        if reg_col in df.columns:
+            invalid_regime = int(~df[reg_col].dropna().isin([-1, 0, 1]).all())
+            record(
+                f"{label} {asset} regime in {{-1,0,1}}",
+                invalid_regime == 0,
+                "OK" if invalid_regime == 0 else f"Invalid regime values",
+            )
+
+        # Check probabilities in [0,1] and sum ≈ 1
+        if bull_col in df.columns and neut_col in df.columns and bear_col in df.columns:
+            probs = df[[bull_col, neut_col, bear_col]].dropna()
+            if not probs.empty:
+                # Check each prob in [0,1]
+                out_of_range = int(((probs < 0) | (probs > 1)).any().any())
+                record(
+                    f"{label} {asset} probs in [0,1]",
+                    out_of_range == 0,
+                    "OK" if out_of_range == 0 else f"Probabilities outside [0,1]",
+                )
+
+                # Check sum ≈ 1
+                prob_sums = probs.sum(axis=1)
+                invalid_sums = int((prob_sums.abs() - 1 > 1e-3).sum())
+                record(
+                    f"{label} {asset} prob sum ≈ 1",
+                    invalid_sums == 0,
+                    "OK" if invalid_sums == 0 else f"{invalid_sums} probability sums not ≈ 1",
+                )
+
+
+def check_feature_variance(df: pd.DataFrame, label: str) -> None:
+    for col in df.columns:
+        if col.endswith("Return") or col.endswith("trend_strength") or col.endswith("volatility"):
+            std_val = df[col].std()
+            has_variance = std_val > 1e-8
+            record(
+                f"{label} {col} has variance",
+                has_variance,
+                f"std={std_val:.2e}" if has_variance else f"Constant feature (std={std_val:.2e})",
             )
 
 
@@ -554,6 +651,11 @@ def run_validation(train_path: str, test_path: str) -> int:
     check_ohlcv_sanity(train, "Train")
     check_ohlcv_sanity(test,  "Test")
 
+    # ── Price sanity ───────────────────────────────────────────────────────────
+    logger.info("── PRICE SANITY ────────────────────────────────────────────")
+    check_price_sanity(train, "Train")
+    check_price_sanity(test,  "Test")
+
     # ── Returns ────────────────────────────────────────────────────────────────
     logger.info("── RETURN SANITY ───────────────────────────────────────────")
     check_returns(train, "Train")
@@ -565,9 +667,19 @@ def run_validation(train_path: str, test_path: str) -> int:
     check_rsi_bounds(test,  "Test")
 
     # ── MA / Volatility ────────────────────────────────────────────────────────
-    logger.info("── MA20 & VOLATILITY ───────────────────────────────────────")
+    logger.info("── MA & VOLATILITY ────────────────────────────────────────")
     check_ma_and_volatility(train, "Train")
     check_ma_and_volatility(test,  "Test")
+
+    # ── Regime features ────────────────────────────────────────────────────────
+    logger.info("── REGIME FEATURES ────────────────────────────────────────")
+    check_regime_features(train, "Train")
+    check_regime_features(test,  "Test")
+
+    # ── Feature variance ───────────────────────────────────────────────────────
+    logger.info("── FEATURE VARIANCE ───────────────────────────────────────")
+    check_feature_variance(train, "Train")
+    check_feature_variance(test,  "Test")
 
     # ── Cross-split consistency ────────────────────────────────────────────────
     logger.info("── CROSS-SPLIT CONSISTENCY ─────────────────────────────────")

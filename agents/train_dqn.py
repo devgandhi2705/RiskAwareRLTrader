@@ -35,7 +35,7 @@ LEARNING_RATE        = 1e-4
 BATCH_SIZE           = 64
 BUFFER_SIZE          = 50_000
 GAMMA                = 0.99
-EXPLORATION_FRACTION = 0.5
+EXPLORATION_FRACTION = 0.2
 N_DISCRETE_LEVELS    = 8
 
 
@@ -43,7 +43,7 @@ def _build_action_table(n_assets, n_levels):
     rng     = np.random.default_rng(42)
     actions = set()
 
-    for _ in range(1000):   # S6: reduced from 5000
+    for _ in range(500):
         w = rng.dirichlet(np.ones(n_assets))
         w = np.round(w * n_levels) / n_levels
         s = w.sum()
@@ -128,7 +128,7 @@ def train_dqn():
         train_freq           = 4,
         target_update_interval = 1000,
         policy_kwargs        = dict(net_arch=[256, 256, 128]),
-        device               = "cpu",
+        device               = "auto",
         verbose              = 0,
     )
 

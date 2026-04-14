@@ -34,7 +34,7 @@ ASSET_UNIVERSE: dict[str, str] = {
     "^BSESN":  "Sensex",
 }
 
-START_DATE      = "2016-01-01"
+START_DATE      = "2015-06-15"
 END_DATE        = "2024-12-31"
 INTERVAL        = "1d"
 RAW_OUTPUT_PATH = os.path.join("data", "raw_market_data.csv")
