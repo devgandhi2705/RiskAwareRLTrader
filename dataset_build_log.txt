@@ -1,0 +1,67 @@
+╔══════════════════════════════════════════════════════╗
+║  SAFE RL PORTFOLIO — DATA PIPELINE v3               ║
+╚══════════════════════════════════════════════════════╝
+
+Step 1: Downloading raw OHLCV data …
+
+Step 2: Computing technical indicators …
+
+Step 3: Cleaning dataset …
+  Cleaning dataset — input shape: (3487, 70)
+  Dropped first 50 warm-up rows (MA50 window).
+  Clean complete — final shape: (3437, 70)
+
+Step 4: Reordering columns …
+
+Step 5: Splitting train / test …
+  Train: 2557 rows  [2016-01-01 → 2022-12-31]
+  Test : 730  rows  [2023-01-01 → 2024-12-31]
+
+Step 6: Saving datasets …
+  Saved train → C:\Users\Dev Gandhi\Downloads\project\data\train_dataset.csv  (2557 rows × 70 cols)
+  Saved test  → C:\Users\Dev Gandhi\Downloads\project\data\test_dataset.csv   (730  rows × 70 cols)
+
+=======================================================
+  DATASET SUMMARY
+=======================================================
+  Full  :  3437 rows ×  70 cols
+  Train :  2557 rows
+  Test  :   730 rows
+  Indicator columns : 35 / 35 expected
+  NaN rate (indicators) : 2.76%
+  Output files:
+    C:\Users\Dev Gandhi\Downloads\project\data\train_dataset.csv
+    C:\Users\Dev Gandhi\Downloads\project\data\test_dataset.csv
+=======================================================
+
+Log saved → C:\Users\Dev Gandhi\Downloads\project\dataset_build_log.txt
+
+=======================================================
+  DATASET VALIDATION  (v3)
+=======================================================
+
+  Validating train_dataset.csv  (C:\Users\Dev Gandhi\Downloads\project\data\train_dataset.csv)
+  Shape    : 2557 rows × 70 cols
+  ✓  Start date  : 2016-01-01
+  ✓  End date    : 2022-12-31
+  Indicator cols : 35 / 35
+  ✓  All 35 indicator columns present
+  ✓  No regime columns (expected)
+  ⚠  NaN rate in indicators: 3.04%  (>1% threshold)
+  ⚠  Columns with NaNs: ['ETH_return', 'ETH_MA20', 'ETH_MA50', 'ETH_volatility']
+  Expected obs dim : 43  (35 indicators + 7 weights + 1 value)
+
+  Validating test_dataset.csv  (C:\Users\Dev Gandhi\Downloads\project\data\test_dataset.csv)
+  Shape    : 730 rows × 70 cols
+  ✓  Start date  : 2023-01-01
+  ⚠  End date 2024-12-30 is earlier than expected 2024-12-31
+  Indicator cols : 35 / 35
+  ✓  All 35 indicator columns present
+  ✓  No regime columns (expected)
+  ✓  NaN rate in indicators : 0.000%
+  Expected obs dim : 43  (35 indicators + 7 weights + 1 value)
+
+=======================================================
+  RESULT: ALL CHECKS PASSED ✓
+=======================================================
+

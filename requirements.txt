@@ -1,23 +1,14 @@
-# Data pipeline
-pandas>=2.0.0
-numpy>=1.24.0
-yfinance>=0.2.36
-ta>=0.11.0
-tqdm>=4.65.0
-
-# RL environment
-gymnasium>=0.29.0
-
-# RL agents
-stable-baselines3>=2.2.0
-torch>=2.0.0           # SB3 backend
-tensorboard>=2.13.0
-h5py>=3.9.0,<4.0.0
-
-# Evaluation & plotting
-matplotlib>=3.7.0
-scipy>=1.11.0
-
-#Demo 
+pandas==2.3.3
+numpy==2.4.4
+yfinance==1.2.1
+ta==0.11.0
+tqdm
+gymnasium==1.2.3
+stable-baselines3
+torch==2.5.1+cu121
+tensorboard==2.19.0
+h5py
+matplotlib==3.10.8
+scipy==1.17.1
 streamlit
-streamlit-autorefresh
+streamlit-autorefresh==1.0.1

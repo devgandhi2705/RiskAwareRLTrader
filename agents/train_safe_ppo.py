@@ -1,23 +1,23 @@
 """
-train_safe_ppo.py  (v2)
+train_safe_ppo.py  (v3)
 ------------------------
-Trains Safe PPO with risk-penalised reward.
+Trains Safe PPO with risk-switched reward.
 Delegates entirely to train_ppo(safe_reward=True).
-
-Reward includes:
-  - Turnover penalty     (S3)
-  - Drawdown penalty     (S7)
-  - CVaR penalty         (S7)
-  - Volatility penalty   (S8)
 """
 
-import os, sys
+import os
+import sys
+
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
-from agents.train_ppo import train_ppo
+
+from agents.train_ppo import train_ppo, log
+
 
 def train_safe_ppo():
+    log("\n[train_safe_ppo] Delegating to train_ppo(safe_reward=True)")
     train_ppo(safe_reward=True)
+
 
 if __name__ == "__main__":
     train_safe_ppo()

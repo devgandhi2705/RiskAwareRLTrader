@@ -1,298 +1,351 @@
-# Regime-Aware Reinforcement Learning Portfolio Manager
+```markdown
+# Reinforcement Learning Portfolio Manager
 
-An AI portfolio manager that uses **reinforcement learning** to dynamically allocate capital across multiple assets based on market conditions.
+A multi-asset portfolio management system that uses **Reinforcement Learning (RL)** to dynamically allocate capital across global markets.
 
-The system learns to behave differently during **bull, neutral, and bear markets**, balancing **profit generation and risk control**.
+The system trains multiple RL agents to learn **portfolio allocation strategies** that aim to outperform traditional investment strategies such as **Equal Weight, Risk Parity, and Momentum**.
 
 ---
 
-# Goal
+# Project Goal
 
-Build an AI portfolio management system that:
+The objective of this project is to build an RL-based portfolio manager that can:
 
-- Captures returns during **bull markets**
-- Maintains balanced allocation during **sideways markets**
-- Reduces exposure during **bear markets**
-- Allocates capital **dynamically across multiple assets**
-- Maintains **risk-aware portfolio behavior**
+- Generate **alpha** by outperforming traditional strategies  
+- Adapt to different market conditions  
+- Manage risk during market downturns  
+- Allocate capital dynamically across multiple assets  
+
+The project compares three agents:
+
+| Agent | Role |
+|------|------|
+| **DQN** | Baseline RL strategy |
+| **PPO** | Alpha generation agent |
+| **Safe PPO** | Risk-aware portfolio manager |
 
 ---
 
 # Assets Used
 
+The portfolio is built across **7 diversified assets**:
+
 | Category | Assets |
-|---|---|
+|--------|--------|
 | Crypto | BTC, ETH |
-| Global Markets | SPY (S&P500 ETF), GLD (Gold ETF), Silver |
+| Global Markets | SPY (S&P500 ETF) |
+| Commodities | Gold (GLD), Silver |
 | Indian Markets | Nifty50, Sensex |
 
-This allows the agent to learn **cross-asset portfolio allocation strategies**.
+This diversification allows the RL agents to learn **cross-asset allocation strategies**.
 
 ---
 
 # Dataset
 
-| Property | Value |
-|---|---|
-| Time Period | 2016 – 2024 |
-| Training Data | 2016 – 2022 |
-| Test Data | 2023 – 2024 |
-| Dataset Size | ~2500 rows |
-| Features | ~60+ |
+The dataset contains **daily market data with technical indicators**.
 
-Features include:
+### Training Data
+2016-01-01 → 2022-12-31
 
-- Asset prices
-- Daily returns
-- Technical indicators
-- Rolling volatility
-- Market regime labels
-- Trend strength signals
+### Test Data
+2023-01-01 → 2024-12-31
+
+Each asset includes only the **most important indicators** to keep the observation space manageable.
+
+### Features per Asset
+
+- Return  
+- MA20  
+- MA50  
+- RSI  
+- Rolling Volatility  
+
+Total features:
+
+```
+
+7 assets × 5 indicators = 35 features
+
+* 7 portfolio weights
+* 1 portfolio value
 
 ---
 
-# Market Regime Detection
-
-Market regimes are estimated using **trend signals derived from moving averages**.
-
-Trend strength is calculated as:
+43 total observation features
 
 ```
-trend_strength = (MA50 − MA200) / MA200
-```
-
-Regime classification:
-
-| Regime | Description |
-|---|---|
-| Bull | Strong upward trend |
-| Neutral | Sideways or weak trend |
-| Bear | Strong downward trend |
-
-Each asset is classified independently, allowing the model to detect situations like:
-
-```
-BTC → Bull
-ETH → Bull
-SPY → Neutral
-GLD → Bull
-Nifty → Bear
-Sensex → Bear
-```
-
-This allows the RL agent to allocate capital according to **individual asset conditions**.
 
 ---
 
 # Reinforcement Learning Setup
 
-The portfolio problem is modeled as a **Markov Decision Process (MDP)**.
+### Observation (State)
 
-| Component | Description |
-|---|---|
-| State | Market features (returns, trend strength, volatility, regime) |
-| Action | Portfolio allocation across all assets |
-| Environment | Simulated trading system |
-| Reward | Portfolio return adjusted by risk penalties |
+The RL agent observes:
 
-The agent observes market signals and decides **how to distribute capital across assets**.
+- Asset indicators  
+- Portfolio weights  
+- Portfolio value  
 
----
+### Action Space
 
-# Reward Function
-
-The reward function encourages **profit generation while controlling risk**.
-
-Reward components:
-
-### Portfolio Return
-Primary objective is to maximize portfolio returns.
-
-### Risk Penalties
-
-The agent is penalized for excessive risk.
-
-| Penalty | Purpose |
-|---|---|
-| Volatility Penalty | discourages unstable portfolios |
-| Drawdown Penalty | discourages large losses |
-| Turnover Penalty | discourages excessive trading |
-
-These penalties encourage **stable portfolio growth instead of aggressive speculation**.
-
----
-
-# Agents Implemented
-
-### DQN (Baseline)
-
-- Uses discrete actions
-- Simpler RL approach
-- Serves as a baseline model
-
----
-
-### PPO (Proximal Policy Optimization)
-
-- Stable policy learning
-- Handles complex environments better
-- Produces stronger portfolio strategies
-
----
-
-### Safe PPO (Risk-Aware PPO)
-
-Safe PPO extends PPO by including additional **risk penalties** in the reward function:
-
-- Volatility penalties
-- Drawdown penalties
-- Turnover penalties
-
-This encourages the agent to maintain **controlled risk exposure**.
-
----
-
-# Training Method — Walk-Forward Validation
-
-To avoid overfitting, the system uses **rolling training windows**.
+The agent outputs **continuous portfolio weights**:
 
 ```
-Train 2016-2017 → Validate 2018
-Train 2017-2018 → Validate 2019
-Train 2018-2019 → Validate 2020
-Train 2019-2020 → Validate 2021
-Train 2020-2021 → Validate 2022
+
+[BTC, ETH, SPY, GLD, Silver, Nifty50, Sensex]
+
 ```
 
-This ensures the model learns **robust strategies across different market conditions**.
+Weights are normalized so that:
+
+```
+
+sum(weights) = 1
+
+```
+
+Maximum allocation per asset:
+
+```
+
+max_weight = 0.90
+
+```
 
 ---
 
-# Evaluation
+# Reward Functions
 
-Agents are evaluated on **unseen test data (2023–2024)**.
+### PPO (Alpha Generator)
 
-Baseline strategies used for comparison:
+PPO is trained to **beat the Momentum strategy**.
 
-- Equal Weight Portfolio
-- Risk Parity Portfolio
-- Momentum Strategy
+```
 
-Evaluation metrics include:
+reward =
+portfolio_return
 
-- Total Return
-- Sharpe Ratio
-- Sortino Ratio
-- Maximum Drawdown
-- Volatility
-- CVaR (tail risk)
+* 0.5 * (portfolio_return - momentum_return)
 
-Example results:
+- 0.0025 * turnover
 
-| Agent | Return | Sharpe | Max Drawdown |
-|---|---|---|---|
-| PPO | ~54% | ~2.1 | ~11% |
-| Safe PPO | ~25% | ~1.9 | ~7% |
-| DQN | ~19% | ~1.5 | ~7% |
+```
 
-PPO achieves higher returns while Safe PPO maintains **lower risk and smaller drawdowns**.
+This encourages the agent to:
+
+- maximize portfolio returns  
+- outperform momentum  
+- avoid excessive trading  
+
+---
+
+### Safe PPO (Risk Protection)
+
+Safe PPO behaves like PPO normally, but **switches to risk control during market downturns**.
+
+During bearish conditions:
+
+```
+
+reward =
+0.5 * portfolio_return
+
+* 2 * volatility
+* 3 * drawdown
+
+```
+
+This encourages:
+
+- lower volatility  
+- lower drawdowns  
+- capital protection  
+
+---
+
+# Training Method
+
+Instead of walk-forward retraining, the system uses **randomized training episodes**.
+
+```
+
+episode_length = 255 trading days
+
+```
+
+Episodes start at random points in the dataset, allowing the agent to experience:
+
+- bull markets  
+- bear markets  
+- sideways markets  
+
+Training timesteps:
+
+```
+
+1,000,000 steps
+
+```
+
+---
+
+# Baseline Strategies
+
+The RL agents are compared against three traditional portfolio strategies:
+
+| Strategy | Description |
+|-------|-------------|
+| Equal Weight | Equal allocation across all assets |
+| Risk Parity | Risk-balanced portfolio |
+| Momentum (60d) | Invest in strongest trending assets |
+
+Momentum serves as the **primary benchmark for alpha generation**.
+
+---
+
+# Evaluation Metrics
+
+Agents are evaluated on **unseen test data (2023-2024)** using:
+
+- Total Return  
+- Sharpe Ratio  
+- Sortino Ratio  
+- Maximum Drawdown  
+- CVaR  
+- Annual Volatility  
+- Turnover  
 
 ---
 
 # Project Structure
 
 ```
+
 project/
+│
+├── data/
+│   ├── raw_market_data.csv
+│   ├── train_dataset.csv
+│   └── test_dataset.csv
+│
+├── data_pipeline/
+│   ├── download_data.py
+│   ├── feature_engineering.py
+│   ├── build_dataset.py
+│   └── validate_dataset.py
+│
+├── environment/
+│   └── trading_environment.py
+│
+├── agents/
+│   ├── train_dqn.py
+│   ├── train_ppo.py
+│   └── train_safe_ppo.py
+│
+├── evaluation/
+│   ├── evaluate_agent.py
+│   └── evaluate_and_ablate.py
+│
+├── results/
+│
+├── train_all.py
+├── requirements.txt
+└── README.md
 
-agents/
-    train_dqn.py
-    train_ppo.py
-    train_safe_ppo.py
-
-environment/
-    trading_environment.py
-
-features/
-    regime_detection.py
-
-data/
-    train_dataset.csv
-    test_dataset.csv
-
-models/
-    dqn_portfolio.zip
-    ppo_portfolio.zip
-    safe_ppo_portfolio.zip
-
-results/
-    performance_metrics.csv
-    portfolio_value_curves.png
-    drawdown_curves.png
-    training_curves.png
-
-demo/
-    demo_live_portfolio.py
-    demo_dashboard.py
-
-README.md
 ```
 
 ---
 
-# Demo System
+# Running the Project
 
-The project includes a simple **AI portfolio manager simulation**.
+### 1. Install dependencies
 
-Workflow:
+```
 
-1. Load trained RL model
-2. Read historical market data
-3. Simulate daily market updates
-4. Agent decides portfolio allocation
-5. Portfolio value updates
-6. Dashboard visualizes results
+pip install -r requirements.txt
 
-The **Streamlit dashboard** displays:
-
-- Portfolio value
-- Asset allocation
-- Market regime
-- Performance metrics
+```
 
 ---
 
-# Future Scope
+### 2. Build the dataset
 
-## Improving the RL Model
+```
 
-Potential improvements:
+python data_pipeline/build_dataset.py
 
-- Continuous portfolio allocation models
-- Transformer-based market prediction
-- Multi-agent reinforcement learning
-- Improved reward design
-- Advanced regime detection models
+```
 
 ---
 
-## Real Trading Deployment
+### 3. Train all agents
 
-Future production deployment could include:
+```
 
-- Real-time market data APIs
-- Broker API integration (Alpaca, Zerodha, etc.)
-- Automated order execution
-- Live portfolio monitoring
-- Advanced risk management tools
+python train_all.py
+
+```
+
+This will:
+
+- build dataset  
+- validate dataset  
+- train DQN  
+- train PPO  
+- train Safe PPO  
+- run evaluation  
 
 ---
 
-# Project Outcome
+### 4. View results
 
-This project demonstrates how **reinforcement learning can be applied to multi-asset portfolio management**, enabling an AI system to dynamically adapt its allocation strategy based on changing market conditions while maintaining risk awareness.
+Results will be saved in:
 
+```
 
-Also:
+results/
 
-how to access logs
--> tensorboard --logs
+```
+
+Including:
+
+- portfolio_value_curves.png  
+- drawdown_curves.png  
+- rolling_sharpe.png  
+- metrics_comparison.png  
+
+---
+
+# Key Design Decisions
+
+The final system was simplified to improve RL training stability:
+
+- Removed regime detection features  
+- Reduced observation feature size  
+- Simplified reward functions  
+- Allowed aggressive allocations (max_weight = 0.90)  
+- Used randomized training episodes instead of walk-forward retraining  
+
+These changes help the RL agents learn **more stable and interpretable strategies**.
+
+---
+
+# Future Improvements
+
+Potential extensions include:
+
+- multi-agent reinforcement learning  
+- transformer-based market representations  
+- macroeconomic data integration  
+- dynamic risk budgeting  
+- live trading deployment  
+
+---
+
+# Disclaimer
+
+This project is for **research and educational purposes only**.  
+It is **not financial advice** and should not be used directly for live trading without extensive testing.
+```

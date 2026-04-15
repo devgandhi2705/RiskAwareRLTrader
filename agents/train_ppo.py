@@ -1,30 +1,25 @@
 """
-train_ppo.py  (v4 — Alpha-Aware Training Config)
--------------------------------------------------
-Trains PPO (baseline) and Safe PPO agents with the v6 regime-aware environment.
+train_ppo.py  (v5 — Random-Episode Training)
+---------------------------------------------
+Trains PPO (alpha agent) and Safe PPO (risk-aware agent).
 
-Changes from v3
+Changes from v4
 ---------------
-  T1 : TIMESTEPS_PER_WINDOW increased 150 000 → 250 000  (Section 8)
-  T2 : Fine-tune floor raised  10 000 → 50 000           (Section 8)
-  T3 : ENT_COEF reduced 0.02 → 0.003                    (Section 8)
-  T4 : Guard added: skip detect_market_regime() when regime
-       columns already exist in the CSV (avoids double computation).
-
-Retained from v3
-----------------
-  Walk-forward training (5 windows) + full fine-tune
-  norm_obs=True, norm_reward=False, clip_obs=10.0
-  lr=1e-4, clip_range=0.1, n_steps=2048, batch=64, epochs=10
-  random_start=True during all training windows
-  All callbacks (RewardLogger, EpisodeStatsCallback, DebugRewardCallback)
+  P1 : Walk-forward training REMOVED.
+       Random-episode training: each episode starts at a random index.
+  P2 : Total timesteps = 1,000,000.
+  P3 : Validation set 2021-01-01 → 2022-12-31.
+       Checkpoint saved based on best validation Sharpe.
+  P4 : Logging via log() → terminal + training_log.txt.
+  P5 : No regime features in data (compatible with v3 dataset).
+  P6 : ent_coef = 0.003 (from v4).
 
 Part of: Safe RL for Risk-Constrained Portfolio Management
 """
 
 import os
 import sys
-
+import time
 import numpy as np
 import pandas as pd
 import matplotlib
@@ -39,40 +34,43 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
-from env.trading_environment import PortfolioTradingEnv
-from data_pipeline.regime_detection import detect_market_regime, get_regime_stats
+from env.trading_environment import PortfolioTradingEnv, OBS_DIM
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+LOG_FILE = os.path.join(PROJECT_ROOT, "training_log.txt")
+
+def log(msg: str) -> None:
+    print(msg)
+    with open(LOG_FILE, "a", encoding="utf-8") as f:
+        f.write(msg + "\n")
 
 # ── Config ────────────────────────────────────────────────────────────────────
 TRAIN_DATA_PATH = os.path.join(PROJECT_ROOT, "data", "train_dataset.csv")
 MODEL_DIR       = os.path.join(PROJECT_ROOT, "models")
 RESULTS_DIR     = os.path.join(PROJECT_ROOT, "results")
 
-TOTAL_TIMESTEPS      = 500_000
-LEARNING_RATE        = 1e-4
-N_STEPS              = 2048
-BATCH_SIZE           = 64
-N_EPOCHS             = 10
-GAMMA                = 0.99
-GAE_LAMBDA           = 0.95
-CLIP_RANGE           = 0.1
-ENT_COEF             = 0.003          # T3: reduced from 0.02 → stabilises policy
-TIMESTEPS_PER_WINDOW = 250_000        # T1: increased from 150 000
-MIN_FINE_TUNE_STEPS  = 50_000         # T2: increased from 10 000
+TOTAL_TIMESTEPS   = 1_000_000
+LEARNING_RATE     = 1e-4
+N_STEPS           = 2048
+BATCH_SIZE        = 64
+N_EPOCHS          = 10
+GAMMA             = 0.99
+GAE_LAMBDA        = 0.95
+CLIP_RANGE        = 0.1
+ENT_COEF          = 0.003
 
-WALK_FORWARD_WINDOWS = [
-    ("2016-01-01", "2017-12-31", "2018-12-31"),
-    ("2017-01-01", "2018-12-31", "2019-12-31"),
-    ("2018-01-01", "2019-12-31", "2020-12-31"),
-    ("2019-01-01", "2020-12-31", "2021-12-31"),
-    ("2020-01-01", "2021-12-31", "2022-12-31"),
-]
+# Validation window (held out from random-episode training for checkpointing)
+VAL_START = "2021-01-01"
+VAL_END   = "2022-12-31"
+
+# How often to run validation (in timesteps)
+VAL_INTERVAL = 100_000
 
 
 # ── Callbacks ─────────────────────────────────────────────────────────────────
 
 class RewardLogger(BaseCallback):
-    """Accumulates per-episode total rewards for plotting."""
-
+    """Accumulates per-episode total rewards."""
     def __init__(self, verbose=0):
         super().__init__(verbose)
         self.episode_rewards = []
@@ -86,31 +84,65 @@ class RewardLogger(BaseCallback):
         return True
 
 
-class DebugRewardCallback(BaseCallback):
-    """Logs reward component breakdown for the first N_DEBUG_EPISODES."""
-
-    N_DEBUG_EPISODES = 5
-
-    def __init__(self, verbose=0):
+class ValidationCallback(BaseCallback):
+    """
+    Runs one deterministic validation episode every VAL_INTERVAL steps.
+    Saves a checkpoint whenever validation Sharpe improves.
+    """
+    def __init__(self, val_df, model_path, vecnorm_path, safe, interval, verbose=0):
         super().__init__(verbose)
-        self._ep_count = 0
+        self.val_df       = val_df
+        self.model_path   = model_path
+        self.vecnorm_path = vecnorm_path
+        self.safe         = safe
+        self.interval     = interval
+        self.best_sharpe  = -np.inf
+        self._last_check  = 0
 
     def _on_step(self):
-        if self.locals["dones"][0] and self._ep_count < self.N_DEBUG_EPISODES:
-            try:
-                env = self.training_env.envs[0].env   # VecEnv → Monitor → Env
-                log = env.get_episode_debug_log()
-                if log:
-                    print(f"  [DEBUG ep {self._ep_count + 1}] {log}")
-            except Exception:
-                pass
-            self._ep_count += 1
+        if self.num_timesteps - self._last_check < self.interval:
+            return True
+        self._last_check = self.num_timesteps
+
+        env_val  = PortfolioTradingEnv(self.val_df, safe_reward=self.safe,
+                                       random_start=False)
+        obs, _   = env_val.reset()
+        done     = False
+        vals     = [env_val.initial_value]
+        rets     = []
+
+        while not done:
+            obs_n     = self.training_env.normalize_obs(obs.reshape(1, -1))[0]
+            action, _ = self.model.predict(obs_n, deterministic=True)
+            obs, _, done, trunc, info = env_val.step(action)
+            done = done or trunc
+            vals.append(info["portfolio_value"])
+            rets.append(info["net_return"])
+
+        if len(rets) < 5:
+            return True
+
+        r   = np.array(rets)
+        std = r.std()
+        sh  = float(r.mean() / std * np.sqrt(252)) if std > 1e-10 else 0.0
+        ret = (vals[-1] - vals[0]) / vals[0] * 100
+
+        dd_arr = np.maximum.accumulate(vals)
+        dd_max = float(((dd_arr - vals) / np.where(dd_arr > 0, dd_arr, 1e-9)).max()) * 100
+
+        log(f"  [Val @ {self.num_timesteps:,}]  "
+            f"Return={ret:+.2f}%  Sharpe={sh:.3f}  MaxDD={dd_max:.2f}%")
+
+        if sh > self.best_sharpe:
+            self.best_sharpe = sh
+            self.model.save(self.model_path + "_best")
+            self.training_env.save(self.vecnorm_path + "_best")
+            log(f"  → New best Sharpe={sh:.3f}  checkpoint saved.")
+
         return True
 
 
 class EpisodeStatsCallback(BaseCallback):
-    """Logs per-episode environment stats to TensorBoard."""
-
     def __init__(self, verbose=0):
         super().__init__(verbose)
         self._buf = []
@@ -122,257 +154,162 @@ class EpisodeStatsCallback(BaseCallback):
                 "turnover":   info.get("turnover",        0.0),
                 "drawdown":   info.get("drawdown",        0.0),
                 "volatility": info.get("volatility",      0.0),
-                "port_value": info.get("portfolio_value", 0.0),
-                "regime":     info.get("regime",          0),
             })
-
         if self.locals["dones"][0] and self._buf:
             avg_turn = float(np.mean([s["turnover"]   for s in self._buf]))
             avg_dd   = float(np.mean([s["drawdown"]   for s in self._buf]))
             avg_vol  = float(np.mean([s["volatility"] for s in self._buf]))
-            fin_val  = self._buf[-1]["port_value"]
-            bull_n   = sum(1 for s in self._buf if s["regime"] ==  1)
-            bear_n   = sum(1 for s in self._buf if s["regime"] == -1)
-            neut_n   = sum(1 for s in self._buf if s["regime"] ==  0)
-
             if self.logger:
-                self.logger.record("env/avg_turnover",      avg_turn)
-                self.logger.record("env/avg_drawdown",      avg_dd)
-                self.logger.record("env/avg_volatility",    avg_vol)
-                self.logger.record("env/final_portfolio",   fin_val)
-                self.logger.record("env/regime_bull_steps", bull_n)
-                self.logger.record("env/regime_bear_steps", bear_n)
-                self.logger.record("env/regime_neut_steps", neut_n)
+                self.logger.record("env/avg_turnover",  avg_turn)
+                self.logger.record("env/avg_drawdown",  avg_dd)
+                self.logger.record("env/avg_volatility",avg_vol)
             self._buf = []
         return True
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── Data loading ───────────────────────────────────────────────────────────────
 
-def _load_and_prepare(path: str) -> pd.DataFrame:
-    """
-    Load training CSV and attach regime features.
-
-    T4: If regime probability columns are already present (built by
-    build_dataset.py), skip detect_market_regime() to avoid redundant
-    computation. Otherwise attach them now.
-    """
-    df = pd.read_csv(path, index_col="Date", parse_dates=True)
-    if "BTC_bull_prob" in df.columns:
-        return df
-    return detect_market_regime(df)
+def _load(path: str) -> pd.DataFrame:
+    return pd.read_csv(path, index_col="Date", parse_dates=True)
 
 
-def _make_env_fn(df: pd.DataFrame, safe: bool, random_start: bool = True):
+# ── Environment factory ────────────────────────────────────────────────────────
+
+def _make_env_fn(df, safe, random_start=True):
     def _fn():
         env = PortfolioTradingEnv(df, safe_reward=safe, random_start=random_start)
         return Monitor(env)
     return _fn
 
 
-def _build_vecenv(df: pd.DataFrame, safe: bool, random_start: bool = True) -> VecNormalize:
-    """Wrap df in DummyVecEnv + VecNormalize (obs normalised, reward raw)."""
+def _build_vecenv(df, safe, random_start=True):
     vec = DummyVecEnv([_make_env_fn(df, safe, random_start)])
-    vec = VecNormalize(
-        vec,
-        norm_obs=True,
-        norm_reward=False,
-        clip_obs=10.0,
-        gamma=GAMMA,
-    )
+    vec = VecNormalize(vec, norm_obs=True, norm_reward=False,
+                       clip_obs=10.0, gamma=GAMMA)
     return vec
 
 
-def _evaluate_on_window(model: PPO, vecnorm: VecNormalize, df_val: pd.DataFrame) -> float:
-    """Run one deterministic episode; return fractional net return."""
-    env_val = PortfolioTradingEnv(df_val, safe_reward=False, random_start=False)
-    obs, _  = env_val.reset()
-    done    = False
-    while not done:
-        obs_n     = vecnorm.normalize_obs(obs.reshape(1, -1))[0]
-        action, _ = model.predict(obs_n, deterministic=True)
-        obs, _, done, trunc, _ = env_val.step(action)
-        done = done or trunc
-    return (env_val.portfolio_value - env_val.initial_value) / env_val.initial_value
-
-
-# ── Training ──────────────────────────────────────────────────────────────────
+# ── Main training function ─────────────────────────────────────────────────────
 
 def train_ppo(safe_reward: bool = False):
     """
-    Train PPO / Safe PPO with walk-forward validation + full fine-tune.
+    Train PPO / Safe PPO using random-episode training.
 
-    Parameters
-    ----------
-    safe_reward : If True, trains Safe PPO (CVaR / tail penalties active).
+    No walk-forward windows. Validation checkpointing based on Sharpe.
 
-    Returns
-    -------
-    (best_model, full_vecnorm) or (None, None).
+    Returns (model, vecnorm) or (None, None).
     """
     os.makedirs(MODEL_DIR,   exist_ok=True)
     os.makedirs(RESULTS_DIR, exist_ok=True)
 
-    label        = "SAFE PPO" if safe_reward else "PPO BASELINE"
+    label        = "SAFE PPO" if safe_reward else "PPO"
     model_name   = "safe_ppo_portfolio" if safe_reward else "ppo_portfolio"
-    curve_name   = "safe_ppo_train_curve.png" if safe_reward else "ppo_train_curve.png"
     model_path   = os.path.join(MODEL_DIR, model_name)
     vecnorm_path = os.path.join(MODEL_DIR, f"{model_name}_vecnorm.pkl")
+    curve_path   = os.path.join(RESULTS_DIR,
+                                "safe_ppo_train_curve.png" if safe_reward
+                                else "ppo_train_curve.png")
 
-    print("=" * 60)
-    print(f"  {label} — WALK-FORWARD TRAINING (v4)")
-    print("=" * 60)
+    log("=" * 60)
+    log(f"  {label} — RANDOM-EPISODE TRAINING  (v5)")
+    log("=" * 60)
 
-    full_df = _load_and_prepare(TRAIN_DATA_PATH)
+    full_df = _load(TRAIN_DATA_PATH)
+    log(f"Training data: {full_df.shape}  "
+        f"({full_df.index.min().date()} → {full_df.index.max().date()})")
+    log(f"OBS_DIM={OBS_DIM}  total_timesteps={TOTAL_TIMESTEPS:,}  "
+        f"ent_coef={ENT_COEF}")
 
-    stats = get_regime_stats(full_df)
-    print(
-        f"Training data: {full_df.shape}  "
-        f"({full_df.index.min().date()} -> {full_df.index.max().date()})"
-    )
-    print(
-        f"Regime distribution — "
-        f"Bull: {stats.get('bull_pct', 0):.1f}%  "
-        f"Neutral: {stats.get('neutral_pct', 0):.1f}%  "
-        f"Bear: {stats.get('bear_pct', 0):.1f}%"
-    )
-    print(
-        f"Config — ent_coef={ENT_COEF}  "
-        f"steps_per_window={TIMESTEPS_PER_WINDOW:,}  "
-        f"min_fine_tune={MIN_FINE_TUNE_STEPS:,}"
-    )
+    # Training data = everything except validation window
+    train_df = full_df[
+        (full_df.index < VAL_START) | (full_df.index > VAL_END)
+    ].copy()
+    val_df   = full_df.loc[VAL_START:VAL_END].copy()
 
-    best_val_return = -np.inf
-    best_model      = None
-    best_vecnorm    = None
-    all_rewards     = []
+    log(f"Train rows : {len(train_df)}  "
+        f"Val rows   : {len(val_df)}  [{VAL_START} → {VAL_END}]")
 
-    for i, (tr_start, tr_end, val_end) in enumerate(WALK_FORWARD_WINDOWS):
-        print(
-            f"\n  Window {i+1}/{len(WALK_FORWARD_WINDOWS)} | "
-            f"train: {tr_start} → {tr_end}  |  val: {tr_end} → {val_end}"
-        )
-
-        df_train = full_df.loc[tr_start:tr_end].copy()
-        df_val   = full_df.loc[tr_end:val_end].copy()
-
-        if len(df_train) < 100 or len(df_val) < 20:
-            print("    Skipping — insufficient data.")
-            continue
-
-        ws = get_regime_stats(df_train)
-        print(
-            f"    Window regimes — "
-            f"Bull: {ws.get('bull_pct', 0):.0f}%  "
-            f"Neutral: {ws.get('neutral_pct', 0):.0f}%  "
-            f"Bear: {ws.get('bear_pct', 0):.0f}%"
-        )
-
-        vec_env = _build_vecenv(df_train, safe=safe_reward, random_start=True)
-
-        model = PPO(
-            policy        = "MlpPolicy",
-            env           = vec_env,
-            learning_rate = LEARNING_RATE,
-            n_steps       = N_STEPS,
-            batch_size    = BATCH_SIZE,
-            n_epochs      = N_EPOCHS,
-            gamma         = GAMMA,
-            gae_lambda    = GAE_LAMBDA,
-            clip_range    = CLIP_RANGE,
-            ent_coef      = ENT_COEF,
-            policy_kwargs = dict(net_arch=dict(pi=[256, 256, 128], vf=[256, 256, 128])),
-            device        = "cpu",
-            verbose       = 0,
-        )
-
-        reward_cb = RewardLogger()
-        stats_cb  = EpisodeStatsCallback()
-        cb_list   = [reward_cb, stats_cb]
-        if safe_reward:
-            cb_list.append(DebugRewardCallback())
-            print("  [Debug ON: reward components logged for first 5 episodes]")
-
-        model.learn(
-            total_timesteps = TIMESTEPS_PER_WINDOW,
-            callback        = CallbackList(cb_list),
-            progress_bar    = True,
-        )
-        all_rewards.extend(reward_cb.episode_rewards)
-
-        vec_env.training    = False
-        vec_env.norm_reward = False
-        val_ret = _evaluate_on_window(model, vec_env, df_val)
-        print(f"    Validation return: {val_ret * 100:+.2f}%")
-
-        if val_ret > best_val_return:
-            best_val_return = val_ret
-            best_model      = model
-            best_vecnorm    = vec_env
-            print("    → New best model.")
-
-    if best_model is None:
-        print("No model trained — all windows had insufficient data.")
+    if len(train_df) < 300:
+        log("ERROR: insufficient training data.")
         return None, None
 
-    print(f"\n  Best validation return: {best_val_return * 100:+.2f}%")
+    vec_env = _build_vecenv(train_df, safe=safe_reward, random_start=True)
 
-    # Fine-tune on full dataset
-    print("\n  Fine-tuning on full training data …")
-    full_vec = _build_vecenv(full_df, safe=safe_reward, random_start=True)
-    best_model.set_env(full_vec)
-
-    remaining = TOTAL_TIMESTEPS - (TIMESTEPS_PER_WINDOW * len(WALK_FORWARD_WINDOWS))
-    fine_steps = max(remaining, MIN_FINE_TUNE_STEPS)   # T2: floor at 50 000
-
-    fine_reward_cb = RewardLogger()
-    fine_stats_cb  = EpisodeStatsCallback()
-    best_model.learn(
-        total_timesteps     = fine_steps,
-        callback            = CallbackList([fine_reward_cb, fine_stats_cb]),
-        progress_bar        = True,
-        reset_num_timesteps = False,
+    model = PPO(
+        policy        = "MlpPolicy",
+        env           = vec_env,
+        learning_rate = LEARNING_RATE,
+        n_steps       = N_STEPS,
+        batch_size    = BATCH_SIZE,
+        n_epochs      = N_EPOCHS,
+        gamma         = GAMMA,
+        gae_lambda    = GAE_LAMBDA,
+        clip_range    = CLIP_RANGE,
+        ent_coef      = ENT_COEF,
+        policy_kwargs = dict(net_arch=dict(pi=[256, 256, 128], vf=[256, 256, 128])),
+        device        = "auto",
+        verbose       = 0,
     )
-    all_rewards.extend(fine_reward_cb.episode_rewards)
 
-    best_model.save(model_path)
-    full_vec.save(vecnorm_path)
-    print(f"Model saved        → {model_path}.zip")
-    print(f"VecNormalize saved → {vecnorm_path}")
+    reward_cb = RewardLogger()
+    stats_cb  = EpisodeStatsCallback()
+    val_cb    = ValidationCallback(
+        val_df=val_df,
+        model_path=model_path,
+        vecnorm_path=vecnorm_path,
+        safe=safe_reward,
+        interval=VAL_INTERVAL,
+    )
 
-    if all_rewards:
-        _plot_curve(
-            all_rewards,
-            f"{label} Training — Episode Rewards",
-            os.path.join(RESULTS_DIR, curve_name),
-        )
+    log(f"\nTraining {label} for {TOTAL_TIMESTEPS:,} timesteps …")
+    t0 = time.time()
 
-    print(f"\n{label} training complete.\n")
-    return best_model, full_vec
+    model.learn(
+        total_timesteps = TOTAL_TIMESTEPS,
+        callback        = CallbackList([reward_cb, stats_cb, val_cb]),
+        progress_bar    = True,
+    )
+
+    elapsed = time.time() - t0
+    log(f"\n{label} training complete in {elapsed/60:.1f} min.")
+    log(f"Best validation Sharpe: {val_cb.best_sharpe:.3f}")
+
+    # Load best checkpoint if it improved; else use final weights
+    best_zip = model_path + "_best.zip"
+    if os.path.isfile(best_zip):
+        log(f"Loading best checkpoint from {best_zip}")
+        model = PPO.load(model_path + "_best", env=vec_env)
+
+    model.save(model_path)
+    vec_env.save(vecnorm_path)
+    log(f"Model saved        → {model_path}.zip")
+    log(f"VecNormalize saved → {vecnorm_path}")
+
+    if reward_cb.episode_rewards:
+        _plot_curve(reward_cb.episode_rewards,
+                    f"{label} Training — Episode Rewards", curve_path)
+
+    return model, vec_env
 
 
 # ── Plotting ───────────────────────────────────────────────────────────────────
 
-def _plot_curve(rewards: list, title: str, save_path: str) -> None:
+def _plot_curve(rewards, title, save_path):
     fig, ax = plt.subplots(figsize=(10, 4))
     ax.plot(rewards, alpha=0.25, color="darkorange", label="Episode reward")
     if len(rewards) >= 10:
-        window = max(10, len(rewards) // 20)
-        smooth = pd.Series(rewards).rolling(window, min_periods=1).mean()
+        w      = max(10, len(rewards) // 20)
+        smooth = pd.Series(rewards).rolling(w, min_periods=1).mean()
         ax.plot(smooth, color="darkorange", linewidth=2,
-                label=f"Rolling mean ({window} ep)")
+                label=f"Rolling mean ({w} ep)")
     ax.set_title(title, fontsize=13, fontweight="bold")
-    ax.set_xlabel("Episode")
-    ax.set_ylabel("Total Reward")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
+    ax.set_xlabel("Episode"); ax.set_ylabel("Total Reward")
+    ax.legend(); ax.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.savefig(save_path, dpi=150)
     plt.close()
-    print(f"Training curve saved → {save_path}")
+    log(f"Training curve saved → {save_path}")
 
-
-# ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     train_ppo(safe_reward=False)

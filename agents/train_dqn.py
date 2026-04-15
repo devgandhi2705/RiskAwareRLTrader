@@ -1,29 +1,24 @@
 """
-train_dqn.py  (v4 — Alpha-Aware, Tighter Config)
--------------------------------------------------
-DQN baseline — uses the v6 continuous trading environment via a discrete
-action wrapper.  Incorporates same data-loading guard as train_ppo.py v4.
+train_dqn.py  (v5 — Alpha Reward, 43-dim Obs)
+----------------------------------------------
+DQN baseline agent.  Uses the same environment (v8) and reward function
+as PPO/Safe PPO (alpha reward, no regime features).
 
-Changes from v3
+Changes from v4
 ---------------
-  D1 : _load_and_prepare() guard: skip detect_market_regime() when columns
-       already exist in the dataset CSV (avoids double computation).
-  D2 : EXPLORATION_FRACTION reduced 0.2 → 0.15 — agent exploits sooner.
-  D3 : device changed "cpu" → "auto" (use GPU when available).
-  D4 : Action table generation tightened: 500 samples with max_weight=0.40
-       consistent with environment constraint.
-  D5 : ACTION_TABLE_PATH always saved so evaluate_agent.py can load it.
-
-Retained from v3
-----------------
-  DiscretePortfolioWrapper, RewardLogger, _plot_curve
-  400 000 total timesteps, lr=1e-4, batch=64, buffer=50 000
+  D1 : OBS_DIM updated to 43 (matches v8 environment).
+  D2 : Reward = portfolio_return + 0.5 × excess − 0.0025 × turnover
+       (same alpha formula as PPO, implemented in environment).
+  D3 : Random-episode training (same as PPO v5).
+  D4 : Log via log() → terminal + training_log.txt.
+  D5 : Device = auto.
 
 Part of: Safe RL for Risk-Constrained Portfolio Management
 """
 
 import os
 import sys
+import time
 import numpy as np
 import pandas as pd
 import matplotlib
@@ -39,8 +34,15 @@ from stable_baselines3.common.monitor import Monitor
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
-from env.trading_environment import PortfolioTradingEnv, ASSETS, N_ASSETS
-from data_pipeline.regime_detection import detect_market_regime
+from env.trading_environment import PortfolioTradingEnv, ASSETS, N_ASSETS, OBS_DIM
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+LOG_FILE = os.path.join(PROJECT_ROOT, "training_log.txt")
+
+def log(msg: str) -> None:
+    print(msg)
+    with open(LOG_FILE, "a", encoding="utf-8") as f:
+        f.write(msg + "\n")
 
 # ── Config ────────────────────────────────────────────────────────────────────
 TRAIN_DATA_PATH   = os.path.join(PROJECT_ROOT, "data", "train_dataset.csv")
@@ -49,31 +51,24 @@ RESULTS_DIR       = os.path.join(PROJECT_ROOT, "results")
 MODEL_PATH        = os.path.join(MODEL_DIR, "dqn_portfolio")
 ACTION_TABLE_PATH = os.path.join(MODEL_DIR, "dqn_action_table.npy")
 
-TOTAL_TIMESTEPS      = 400_000
+TOTAL_TIMESTEPS      = 1_000_000
 LEARNING_RATE        = 1e-4
 BATCH_SIZE           = 64
 BUFFER_SIZE          = 50_000
 GAMMA                = 0.99
-EXPLORATION_FRACTION = 0.15   # D2: reduced from 0.2
+EXPLORATION_FRACTION = 0.15
 N_DISCRETE_LEVELS    = 8
-MAX_WEIGHT           = 0.40   # D4: consistent with env constraint
+MAX_WEIGHT           = 0.90   # matches env v8 max_weight
 
 
-# ── Action table ──────────────────────────────────────────────────────────────
+# ── Action table ───────────────────────────────────────────────────────────────
 
-def _build_action_table(n_assets: int, n_levels: int, max_w: float = MAX_WEIGHT) -> np.ndarray:
-    """
-    Build a diverse set of discrete portfolio weight vectors.
-
-    Includes:
-      - Dirichlet-sampled vectors (broad coverage)
-      - Equal-weight allocation  (benchmark)
-      - Single-asset dominated allocations capped at max_w
-    """
+def _build_action_table(n_assets: int, n_levels: int, max_w: float) -> np.ndarray:
+    """Build a diverse set of discrete portfolio weight vectors."""
     rng     = np.random.default_rng(42)
     actions = set()
 
-    for _ in range(500):
+    for _ in range(600):
         w = rng.dirichlet(np.ones(n_assets))
         w = np.round(w * n_levels) / n_levels
         s = w.sum()
@@ -85,13 +80,13 @@ def _build_action_table(n_assets: int, n_levels: int, max_w: float = MAX_WEIGHT)
                 w /= s
             actions.add(tuple(np.round(w, 4)))
 
-    # Equal-weight benchmark
+    # Equal weight (benchmark)
     actions.add(tuple(np.round(np.ones(n_assets) / n_assets, 4)))
 
-    # Single-asset capped portfolios
+    # Single-asset concentrated portfolios
     for i in range(n_assets):
-        w       = np.ones(n_assets) * (1.0 - max_w) / (n_assets - 1)
-        w[i]    = max_w
+        w    = np.ones(n_assets) * (1.0 - max_w) / (n_assets - 1)
+        w[i] = max_w
         actions.add(tuple(np.round(w / w.sum(), 4)))
 
     table = np.array(list(actions), dtype=np.float32)
@@ -99,14 +94,10 @@ def _build_action_table(n_assets: int, n_levels: int, max_w: float = MAX_WEIGHT)
     return table
 
 
-# ── Discrete wrapper ──────────────────────────────────────────────────────────
+# ── Discrete wrapper ───────────────────────────────────────────────────────────
 
 class DiscretePortfolioWrapper(gym.Wrapper):
-    """
-    Wraps the continuous PortfolioTradingEnv with a Discrete action space.
-    Each integer action maps to a pre-built portfolio weight vector.
-    PPO / Safe PPO use the environment directly; only DQN needs this wrapper.
-    """
+    """Maps integer actions → portfolio weight vectors."""
 
     def __init__(self, env: gym.Env, action_table: np.ndarray):
         super().__init__(env)
@@ -114,14 +105,13 @@ class DiscretePortfolioWrapper(gym.Wrapper):
         self.action_space = spaces.Discrete(len(action_table))
 
     def step(self, action: int):
-        weights = self.action_table[int(action)]
-        return self.env.step(weights)
+        return self.env.step(self.action_table[int(action)])
 
     def reset(self, **kwargs):
         return self.env.reset(**kwargs)
 
 
-# ── Callback ──────────────────────────────────────────────────────────────────
+# ── Callback ───────────────────────────────────────────────────────────────────
 
 class RewardLogger(BaseCallback):
     def __init__(self, verbose=0):
@@ -137,36 +127,24 @@ class RewardLogger(BaseCallback):
         return True
 
 
-# ── Data loading ──────────────────────────────────────────────────────────────
-
-def _load_and_prepare(path: str) -> pd.DataFrame:
-    """
-    D1: Skip detect_market_regime() when columns already present in CSV.
-    This avoids redundant recomputation when build_dataset.py has already
-    produced the full feature set.
-    """
-    df = pd.read_csv(path, index_col="Date", parse_dates=True)
-    if "BTC_bull_prob" in df.columns:
-        return df
-    return detect_market_regime(df)
-
-
-# ── Training ──────────────────────────────────────────────────────────────────
+# ── Training ───────────────────────────────────────────────────────────────────
 
 def train_dqn():
     os.makedirs(MODEL_DIR,   exist_ok=True)
     os.makedirs(RESULTS_DIR, exist_ok=True)
 
-    print("=" * 60)
-    print("  DQN BASELINE — PORTFOLIO MANAGEMENT (v4)")
-    print("=" * 60)
+    log("=" * 60)
+    log("  DQN — ALPHA REWARD TRAINING  (v5)")
+    log("=" * 60)
 
-    df = _load_and_prepare(TRAIN_DATA_PATH)
-    print(f"Dataset: {df.shape}  ({df.index.min().date()} -> {df.index.max().date()})")
+    df = pd.read_csv(TRAIN_DATA_PATH, index_col="Date", parse_dates=True)
+    log(f"Dataset: {df.shape}  "
+        f"({df.index.min().date()} → {df.index.max().date()})")
+    log(f"OBS_DIM={OBS_DIM}  total_timesteps={TOTAL_TIMESTEPS:,}")
 
     base_env     = PortfolioTradingEnv(df, safe_reward=False, random_start=True)
-    action_table = _build_action_table(N_ASSETS, N_DISCRETE_LEVELS)
-    print(f"Action space: {len(action_table)} discrete portfolio vectors")
+    action_table = _build_action_table(N_ASSETS, N_DISCRETE_LEVELS, MAX_WEIGHT)
+    log(f"Action space: {len(action_table)} discrete portfolio vectors")
 
     env = Monitor(DiscretePortfolioWrapper(base_env, action_table))
 
@@ -182,19 +160,21 @@ def train_dqn():
         train_freq             = 4,
         target_update_interval = 1000,
         policy_kwargs          = dict(net_arch=[256, 256, 128]),
-        device                 = "auto",   # D3
+        device                 = "auto",
         verbose                = 0,
     )
 
     cb = RewardLogger()
-    print(f"Training for {TOTAL_TIMESTEPS:,} timesteps …")
+    log(f"Training for {TOTAL_TIMESTEPS:,} timesteps …")
+    t0 = time.time()
     model.learn(total_timesteps=TOTAL_TIMESTEPS, callback=cb, progress_bar=True)
+    elapsed = time.time() - t0
+    log(f"DQN training complete in {elapsed/60:.1f} min.")
 
-    # D5: always save both model and action table
     model.save(MODEL_PATH)
     np.save(ACTION_TABLE_PATH, action_table)
-    print(f"Model saved        → {MODEL_PATH}.zip")
-    print(f"Action table saved → {ACTION_TABLE_PATH}  ({len(action_table)} vectors)")
+    log(f"Model saved        → {MODEL_PATH}.zip")
+    log(f"Action table saved → {ACTION_TABLE_PATH}  ({len(action_table)} vectors)")
 
     if cb.episode_rewards:
         _plot_curve(
@@ -203,31 +183,23 @@ def train_dqn():
             os.path.join(RESULTS_DIR, "dqn_train_curve.png"),
         )
 
-    print("DQN training complete.\n")
 
-
-# ── Plotting ───────────────────────────────────────────────────────────────────
-
-def _plot_curve(rewards: list, title: str, save_path: str) -> None:
+def _plot_curve(rewards, title, save_path):
     fig, ax = plt.subplots(figsize=(10, 4))
     ax.plot(rewards, alpha=0.3, color="steelblue", label="Episode reward")
     if len(rewards) >= 10:
-        w = max(10, len(rewards) // 20)
+        w      = max(10, len(rewards) // 20)
         smooth = pd.Series(rewards).rolling(w, min_periods=1).mean()
         ax.plot(smooth, color="steelblue", linewidth=2,
                 label=f"Rolling mean ({w} ep)")
     ax.set_title(title, fontsize=13, fontweight="bold")
-    ax.set_xlabel("Episode")
-    ax.set_ylabel("Total Reward")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
+    ax.set_xlabel("Episode"); ax.set_ylabel("Total Reward")
+    ax.legend(); ax.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.savefig(save_path, dpi=150)
     plt.close()
-    print(f"Training curve saved → {save_path}")
+    log(f"Training curve saved → {save_path}")
 
-
-# ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     train_dqn()
