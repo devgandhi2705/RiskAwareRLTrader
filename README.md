@@ -1,4 +1,3 @@
-```markdown
 # Reinforcement Learning Portfolio Manager
 
 A multi-asset portfolio management system that uses **Reinforcement Learning (RL)** to dynamically allocate capital across global markets.
@@ -348,4 +347,3 @@ Potential extensions include:
 
 This project is for **research and educational purposes only**.  
 It is **not financial advice** and should not be used directly for live trading without extensive testing.
-```
