@@ -37,7 +37,7 @@ sys.path.insert(0, PROJECT_ROOT)
 from env.trading_environment import PortfolioTradingEnv, OBS_DIM
 
 # ── Logging ───────────────────────────────────────────────────────────────────
-LOG_FILE = os.path.join(PROJECT_ROOT, "training_log.txt")
+LOG_FILE = os.path.join(PROJECT_ROOT, "logs","training_log.txt")
 
 def log(msg: str) -> None:
     print(msg)

@@ -1,0 +1,32 @@
+=================================================================
+  AGENT EVALUATION — TEST PERIOD (2023–2024)
+=================================================================
+Test data: (730, 70)  (2023-01-01 → 2024-12-30)
+
+Computing baseline strategies …
+
+Evaluating RL agents …
+  + Loaded PPO from C:\Users\Dev Gandhi\Downloads\project\models\ppo_portfolio.zip
+Saved → C:\Users\Dev Gandhi\Downloads\project\results\allocation_ppo.png
+  + Loaded PPO from C:\Users\Dev Gandhi\Downloads\project\models\safe_ppo_portfolio.zip
+Saved → C:\Users\Dev Gandhi\Downloads\project\results\allocation_safe_ppo.png
+  + Loaded DQN from C:\Users\Dev Gandhi\Downloads\project\models\dqn_portfolio.zip
+Saved → C:\Users\Dev Gandhi\Downloads\project\results\allocation_dqn.png
+
+────────────────────────────────────────────────────────────────────────────────
+                Agent  Total Return (%)  Sharpe Ratio  Sortino Ratio  Max Drawdown (%)  CVaR (%)  Ann. Volatility (%)  Avg Turnover
+         Equal Weight             97.58         1.696          2.543             11.26     -1.95                14.49        0.0000
+          Risk Parity             69.53         1.989          2.641              8.50     -1.32                 9.39        0.0048
+       Momentum (60d)            139.83         1.378          1.846             14.71     -3.52                24.01        0.0307
+          PPO (Alpha)             -2.73        -0.161         -0.216             10.77     -1.91                12.31        0.3989
+Safe PPO (Risk-Aware)              8.03         0.959          1.408              5.81     -1.12                 8.32        0.1576
+       DQN (Baseline)             37.38         1.407          2.325             14.02     -3.02                24.42        0.0036
+────────────────────────────────────────────────────────────────────────────────
+
+Metrics saved → C:\Users\Dev Gandhi\Downloads\project\results\performance_metrics.csv
+Saved → C:\Users\Dev Gandhi\Downloads\project\results\portfolio_value_curves.png
+Saved → C:\Users\Dev Gandhi\Downloads\project\results\drawdown_curves.png
+Saved → C:\Users\Dev Gandhi\Downloads\project\results\rolling_sharpe.png
+Saved → C:\Users\Dev Gandhi\Downloads\project\results\metrics_comparison.png
+
+Evaluation complete.  Log saved → C:\Users\Dev Gandhi\Downloads\project\evaluation_log.txt

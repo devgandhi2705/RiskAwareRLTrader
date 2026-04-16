@@ -33,7 +33,7 @@ PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, PROJECT_ROOT)
 
 # ── Logging ───────────────────────────────────────────────────────────────────
-LOG_FILE = os.path.join(PROJECT_ROOT, "training_log.txt")
+LOG_FILE = os.path.join(PROJECT_ROOT, "logs", "training_log.txt")
 
 def log(msg: str) -> None:
     print(msg)

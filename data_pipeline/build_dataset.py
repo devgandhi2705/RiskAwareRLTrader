@@ -47,7 +47,7 @@ from data_pipeline.feature_engineering import (
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 LOG_FILE = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs",
     "dataset_build_log.txt",
 )
 

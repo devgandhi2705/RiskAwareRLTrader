@@ -47,7 +47,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from env.trading_environment import PortfolioTradingEnv, ASSETS, N_ASSETS
 
 # ── Logging ───────────────────────────────────────────────────────────────────
-LOG_FILE = PROJECT_ROOT / "evaluation_log.txt"
+LOG_FILE = PROJECT_ROOT / "logs" / "evaluation_log.txt"
 
 def log(msg: str) -> None:
     print(msg)

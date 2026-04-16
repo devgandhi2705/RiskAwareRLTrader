@@ -1,0 +1,92 @@
+══════════════════════════════════════════════════════════════
+  SAFE RL PORTFOLIO — FULL PIPELINE  (v2)
+══════════════════════════════════════════════════════════════
+  ⚡  GPU: NVIDIA GeForce RTX 4050 Laptop GPU
+
+  Skipping dataset build (--skip-build).
+  ~  DQN (Baseline)                 already trained — skipping
+
+--------------------------------------------------------------
+  Training: PPO (Alpha)
+--------------------------------------------------------------
+============================================================
+  PPO — RANDOM-EPISODE TRAINING  (v5)
+============================================================
+Training data: (2557, 70)  (2016-01-01 → 2022-12-31)
+OBS_DIM=43  total_timesteps=1,000,000  ent_coef=0.003
+Train rows : 1827  Val rows   : 730  [2021-01-01 → 2022-12-31]
+
+Training PPO for 1,000,000 timesteps …
+  [Val @ 100,000]  Return=+112.79%  Sharpe=1.749  MaxDD=35.42%
+  → New best Sharpe=1.749  checkpoint saved.
+  [Val @ 200,000]  Return=+65.91%  Sharpe=2.278  MaxDD=9.92%
+  → New best Sharpe=2.278  checkpoint saved.
+  [Val @ 300,000]  Return=+67.91%  Sharpe=1.473  MaxDD=25.75%
+  [Val @ 400,000]  Return=+166.44%  Sharpe=2.125  MaxDD=28.04%
+  [Val @ 500,000]  Return=+83.61%  Sharpe=1.835  MaxDD=12.71%
+  [Val @ 600,000]  Return=+162.02%  Sharpe=2.072  MaxDD=18.99%
+  [Val @ 700,000]  Return=+115.94%  Sharpe=2.237  MaxDD=13.20%
+  [Val @ 800,000]  Return=+93.55%  Sharpe=2.085  MaxDD=13.94%
+  [Val @ 900,000]  Return=+72.52%  Sharpe=1.913  MaxDD=14.36%
+  [Val @ 1,000,000]  Return=+96.35%  Sharpe=2.378  MaxDD=13.07%
+  → New best Sharpe=2.378  checkpoint saved.
+
+PPO training complete in 102.0 min.
+Best validation Sharpe: 2.378
+Loading best checkpoint from C:\Users\Dev Gandhi\Downloads\project\models\ppo_portfolio_best.zip
+Model saved        → C:\Users\Dev Gandhi\Downloads\project\models\ppo_portfolio.zip
+VecNormalize saved → C:\Users\Dev Gandhi\Downloads\project\models\ppo_portfolio_vecnorm.pkl
+Training curve saved → C:\Users\Dev Gandhi\Downloads\project\results\ppo_train_curve.png
+  ✓  PPO (Alpha) finished  (1:42:03)
+
+--------------------------------------------------------------
+  Training: Safe PPO (Risk-Aware)
+--------------------------------------------------------------
+
+[train_safe_ppo] Delegating to train_ppo(safe_reward=True)
+============================================================
+  SAFE PPO — RANDOM-EPISODE TRAINING  (v5)
+============================================================
+Training data: (2557, 70)  (2016-01-01 → 2022-12-31)
+OBS_DIM=43  total_timesteps=1,000,000  ent_coef=0.003
+Train rows : 1827  Val rows   : 730  [2021-01-01 → 2022-12-31]
+
+Training SAFE PPO for 1,000,000 timesteps …
+  [Val @ 100,000]  Return=+38.79%  Sharpe=1.213  MaxDD=19.67%
+  → New best Sharpe=1.213  checkpoint saved.
+  [Val @ 200,000]  Return=+21.93%  Sharpe=1.385  MaxDD=7.96%
+  → New best Sharpe=1.385  checkpoint saved.
+  [Val @ 300,000]  Return=+5.16%  Sharpe=0.466  MaxDD=8.32%
+  [Val @ 400,000]  Return=+12.16%  Sharpe=0.828  MaxDD=8.97%
+  [Val @ 500,000]  Return=-1.92%  Sharpe=-0.046  MaxDD=11.43%
+  [Val @ 600,000]  Return=+0.78%  Sharpe=0.127  MaxDD=10.59%
+  [Val @ 700,000]  Return=-6.78%  Sharpe=-0.277  MaxDD=15.90%
+  [Val @ 800,000]  Return=-1.91%  Sharpe=-0.033  MaxDD=11.80%
+  [Val @ 900,000]  Return=+1.17%  Sharpe=0.152  MaxDD=12.83%
+  [Val @ 1,000,000]  Return=-5.50%  Sharpe=-0.269  MaxDD=12.80%
+
+SAFE PPO training complete in 92.8 min.
+Best validation Sharpe: 1.385
+Loading best checkpoint from C:\Users\Dev Gandhi\Downloads\project\models\safe_ppo_portfolio_best.zip
+Model saved        → C:\Users\Dev Gandhi\Downloads\project\models\safe_ppo_portfolio.zip
+VecNormalize saved → C:\Users\Dev Gandhi\Downloads\project\models\safe_ppo_portfolio_vecnorm.pkl
+Training curve saved → C:\Users\Dev Gandhi\Downloads\project\results\safe_ppo_train_curve.png
+  ✓  Safe PPO (Risk-Aware) finished  (1:32:46)
+
+══════════════════════════════════════════════════════════════
+  TRAINING SUMMARY
+══════════════════════════════════════════════════════════════
+  ✓ Done    PPO (Alpha)                     1:42:03
+  ✓ Done    Safe PPO (Risk-Aware)           1:32:46
+  ~ Skip   DQN (Baseline)                  (model existed)
+
+  Total wall time: 3:14:55
+
+══════════════════════════════════════════════════════════════
+  Final step: Evaluating agents …
+══════════════════════════════════════════════════════════════
+
+  All steps completed successfully.
+
+  Log saved → C:\Users\Dev Gandhi\Downloads\project\training_log.txt
+
