@@ -35,7 +35,7 @@ ASSET_UNIVERSE: dict[str, str] = {
 }
 
 START_DATE      = "2015-06-15"
-END_DATE        = "2024-12-31"
+END_DATE        = "2025-12-31"
 INTERVAL        = "1d"
 RAW_OUTPUT_PATH = os.path.join("data", "raw_market_data.csv")
 

@@ -61,7 +61,7 @@ def log(msg: str) -> None:
 TRAIN_START = "2016-01-01"
 TRAIN_END   = "2022-12-31"
 TEST_START  = "2023-01-01"
-TEST_END    = "2024-12-31"
+TEST_END    = "2025-12-31"
 
 _THIS_DIR  = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR   = os.path.dirname(_THIS_DIR)

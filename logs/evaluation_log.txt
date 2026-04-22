@@ -1,26 +1,26 @@
 =================================================================
   AGENT EVALUATION — TEST PERIOD (2023–2024)
 =================================================================
-Test data: (730, 70)  (2023-01-01 → 2024-12-30)
+Test data: (1095, 70)  (2023-01-01 → 2025-12-30)
 
 Computing baseline strategies …
 
 Evaluating RL agents …
-  + Loaded DQN (DQN_RISK) from C:\Users\Dev Gandhi\Downloads\project\models\dqn_risk_aware_portfolio.zip
-Saved → C:\Users\Dev Gandhi\Downloads\project\results\allocation_dqn_risk_aware.png
   + Loaded PPO (PPO_HIER) from C:\Users\Dev Gandhi\Downloads\project\models\hier_ppo_portfolio.zip
 Saved → C:\Users\Dev Gandhi\Downloads\project\results\allocation_hier_ppo.png
   + Loaded PPO (SAFE_PPO_HIER) from C:\Users\Dev Gandhi\Downloads\project\models\safe_hier_ppo_portfolio.zip
 Saved → C:\Users\Dev Gandhi\Downloads\project\results\allocation_safe_hier_ppo.png
+  + Loaded DQN (DQN_RISK) from C:\Users\Dev Gandhi\Downloads\project\models\dqn_risk_aware_portfolio.zip
+Saved → C:\Users\Dev Gandhi\Downloads\project\results\allocation_dqn_risk_aware.png
 
 ────────────────────────────────────────────────────────────────────────────────
                      Agent  Total Return (%)  Sharpe Ratio  Sortino Ratio  Max Drawdown (%)  CVaR (%)  Ann. Volatility (%)  Avg Turnover
-              Equal Weight             97.58         1.696          2.543             11.26     -1.95                14.49        0.0000
-               Risk Parity             69.53         1.989          2.641              8.50     -1.32                 9.39        0.0048
-            Momentum (60d)            139.83         1.378          1.846             14.71     -3.52                24.01        0.0307
- DQN Risk-Aware (Dist. v6)             31.17         1.670          2.772              9.51     -2.07                16.91        0.0034
-       Hier-PPO (Alpha v6)              8.36         1.064          1.524              6.11     -1.13                 7.74        0.0093
-Safe-Hier-PPO (Risk-Aware)             10.97         0.783          1.204             11.15     -1.85                14.47        0.0193
+              Equal Weight            163.06         1.547          2.330             19.36     -2.06                15.13        0.0000
+               Risk Parity            116.76         1.962          2.643             10.49     -1.31                 9.30        0.0046
+            Momentum (60d)            350.38         1.489          2.015             15.85     -3.67                25.43        0.0299
+       Hier-PPO (Alpha v6)              3.45         0.390          0.530              8.68     -1.51                 9.85        0.0352
+Safe-Hier-PPO (Risk-Aware)              5.25         0.398          0.643             11.81     -2.06                15.84        0.0618
+ DQN Risk-Aware (Dist. v6)             13.06         1.551          2.420              4.82     -1.05                 8.03        0.0045
 ────────────────────────────────────────────────────────────────────────────────
 
 Metrics saved → C:\Users\Dev Gandhi\Downloads\project\results\performance_metrics.csv

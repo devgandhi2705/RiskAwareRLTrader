@@ -170,13 +170,16 @@ class PortfolioTradingEnv(gym.Env):
         self.total_rows = len(self.df)
 
         # ── Column lookup ──────────────────────────────────────────────────────
-        # Build column name list for observation: 5 features × 7 assets = 35
-        self._obs_feature_cols = [
-            f"{asset}_{feat}"
-            for asset in ASSETS
-            for feat in _ASSET_FEATURES
-        ]
-        self.return_cols = [f"{a}_return" for a in ASSETS]
+        # Grouped by feature type so MultiStreamExtractor slices correctly:
+        #   price stream  (14): returns × 7, MA20 × 7
+        #   indic stream  (21): MA50 × 7, RSI × 7, vol × 7
+        #   portfolio     ( 8): weights × 7, norm_val
+        self.return_cols   = [f"{a}_return"     for a in ASSETS]
+        self._price_cols   = ([f"{a}_return"     for a in ASSETS]
+                            + [f"{a}_MA20"       for a in ASSETS])
+        self._indic_cols   = ([f"{a}_MA50"       for a in ASSETS]
+                            + [f"{a}_RSI"        for a in ASSETS]
+                            + [f"{a}_volatility" for a in ASSETS])
 
         # ── Spaces ─────────────────────────────────────────────────────────────
         self.observation_space = spaces.Box(
@@ -222,20 +225,24 @@ class PortfolioTradingEnv(gym.Env):
         """
         Build the 43-dim observation vector.
 
-        Layout:
-          [indicator features (35)] | [weights (7)] | [norm_value (1)]
+        Layout (matches MultiStreamExtractor stream boundaries):
+          price stream  (14): [return×7, MA20×7]
+          indic stream  (21): [MA50×7, RSI×7, vol×7]
+          portfolio     ( 8): [weights×7, norm_value]
         """
-        # 35 indicator features
-        indicators = np.array(
-            [self._safe_val(row, c) for c in self._obs_feature_cols],
+        price_feats = np.array(
+            [self._safe_val(row, c) for c in self._price_cols],
+            dtype=np.float32,
+        )
+        indic_feats = np.array(
+            [self._safe_val(row, c) for c in self._indic_cols],
             dtype=np.float32,
         )
 
-        # Portfolio state
         norm_val = float(self.portfolio_value / self.initial_value) - 1.0
         port_vec = np.append(self.weights, np.float32(norm_val))   # (8,)
 
-        obs = np.concatenate([indicators, port_vec])
+        obs = np.concatenate([price_feats, indic_feats, port_vec])
         obs = np.clip(obs, -1e6, 1e6)
         return obs.astype(np.float32)
 
@@ -504,6 +511,7 @@ class PortfolioTradingEnv(gym.Env):
             "weights":           self.weights.tolist(),
             "reward_mode":       comps.get("mode"),
             "reward_components": comps,
+            "episode_start":     self.episode_start,
             # Provide regime=0 always so evaluate_agent.py doesn't break
             "regime":            0,
         }

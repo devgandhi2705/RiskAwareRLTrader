@@ -41,7 +41,7 @@ EXPECTED_OBS_DIM  = EXPECTED_N_IND + len(ASSETS) + 1   # 43
 TRAIN_START = "2016-01-01"
 TRAIN_END   = "2022-12-31"
 TEST_START  = "2023-01-01"
-TEST_END    = "2024-12-31"
+TEST_END    = "2025-12-31"
 
 
 def log(msg: str) -> None:

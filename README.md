@@ -48,7 +48,7 @@ The dataset contains **daily market data with technical indicators**.
 2016-01-01 → 2022-12-31
 
 ### Test Data
-2023-01-01 → 2024-12-31
+2023-01-01 → 2025-12-31
 
 Each asset includes only the **most important indicators** to keep the observation space manageable.
 
@@ -206,7 +206,7 @@ Momentum serves as the **primary benchmark for alpha generation**.
 
 # Evaluation Metrics
 
-Agents are evaluated on **unseen test data (2023-2024)** using:
+Agents are evaluated on **unseen test data (2023-2025)** using:
 
 - Total Return  
 - Sharpe Ratio  

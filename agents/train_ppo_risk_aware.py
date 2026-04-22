@@ -262,7 +262,6 @@ class MultiObjectiveRewardWrapper(gym.Wrapper):
         self._last_info = info
 
         net_ret  = float(info.get("net_return",       0.0))
-        turnover = float(info.get("turnover",         0.0))
         drawdown = float(info.get("drawdown",         0.0))
 
         # Update distributional risk estimator with this step's return
@@ -272,16 +271,22 @@ class MultiObjectiveRewardWrapper(gym.Wrapper):
         # Lagrangian constraint violation  (Paper 1 — safety constraint)
         violation = max(0.0, drawdown - self.max_dd)
 
-        # Multi-objective reward  (Paper 4 formula)
+        # Use the env's V8 reward (bear/bull mode + momentum + turnover penalty)
+        # as the base, then layer CVaR penalty and safety constraint on top.
+        # Previously net_ret was used here, which silently discarded the full
+        # V8 reward computation (bear-mode scaling, momentum excess, etc.).
         shaped_reward = (
-            self.w_return   * net_ret
-            - self.w_cvar   * cvar
-            - self.w_turnover * turnover
-            - self.lambda_  * violation
+            self.w_return * reward
+            - self.w_cvar * cvar
+            - self.lambda_ * violation
         )
 
-        # Online Lagrangian multiplier update (dual ascent, Paper 1)
-        self.lambda_ = max(0.0, self.lambda_ + LAMBDA_LR * violation)
+        # Online Lagrangian multiplier update (dual ascent, Paper 1).
+        # Capped at 1.0 to prevent lambda from exploding and killing reward signal.
+        self.lambda_ = min(
+            max(0.0, self.lambda_ + LAMBDA_LR * violation),
+            1.0,
+        )
 
         # Expose shaped components in info for logging
         info["cvar"]           = cvar
@@ -409,7 +414,9 @@ class ScenarioSamplerCallback(BaseCallback):
         if self.locals["dones"][0]:
             self._ep_drawdowns.append((self._ep_start_idx, self._ep_peak_dd))
             self._ep_peak_dd   = 0.0
-            self._ep_start_idx = self.num_timesteps
+            # Use the env's data-row episode_start, not the training timestep count.
+            # num_timesteps is a global step counter and is NOT a valid df row index.
+            self._ep_start_idx = int(info.get("episode_start", 0))
 
             # Keep only recent history
             if len(self._ep_drawdowns) > 500:
