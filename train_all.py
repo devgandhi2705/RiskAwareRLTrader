@@ -1,23 +1,24 @@
 """
-train_all.py  (v2 — Full Pipeline, Simple Logging)
----------------------------------------------------
+train_all.py  (v3 — Risk-Aware Pipeline)
+-----------------------------------------
 Master orchestration script.
 
 Pipeline order:
-  1. data_pipeline/build_dataset.py  — build / rebuild dataset
-  2. data_pipeline/validate_dataset.py — sanity check
-  3. agents/train_dqn.py
-  4. agents/train_ppo.py
-  5. agents/train_safe_ppo.py
-  6. evaluation/evaluate_agent.py
+  1. data_pipeline/build_dataset.py       — build / rebuild dataset
+  2. data_pipeline/validate_dataset.py    — sanity check
+  3. agents/train_ppo_risk_aware.py       — Hierarchical PPO  (safe_reward=False)
+  4. agents/train_ppo_risk_aware.py       — Safe Hierarchical PPO  (safe_reward=True)
+  5. agents/train_dqn_risk_aware.py       — Distributional DQN with hierarchical action filter
+  6. evaluation/evaluate_agent.py         — benchmark all agents on test data
 
 Usage
 -----
-    python train_all.py                       # full pipeline
-    python train_all.py --skip-build          # skip dataset rebuild
-    python train_all.py --agents ppo          # train only PPO
-    python train_all.py --skip-existing       # skip already-trained models
-    python train_all.py --no-eval             # skip final evaluation
+    python train_all.py                              # full pipeline
+    python train_all.py --skip-build                 # skip dataset rebuild
+    python train_all.py --agents hier_ppo            # train only Hier-PPO
+    python train_all.py --agents hier_ppo safe_hier_ppo  # train both PPO variants
+    python train_all.py --skip-existing              # skip already-trained models
+    python train_all.py --no-eval                    # skip final evaluation
 
 Part of: Safe RL for Risk-Constrained Portfolio Management
 """
@@ -37,31 +38,32 @@ LOG_FILE = os.path.join(PROJECT_ROOT, "logs", "training_log.txt")
 
 def log(msg: str) -> None:
     print(msg)
+    os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
     with open(LOG_FILE, "a", encoding="utf-8") as f:
         f.write(msg + "\n")
 
 # ── Agent registry ────────────────────────────────────────────────────────────
 AGENTS = {
-    "dqn": {
-        "label":      "DQN (Baseline)",
-        "module":     "agents.train_dqn",
-        "fn":         "train_dqn",
-        "fn_kwargs":  {},
-        "model_file": "models/dqn_portfolio.zip",
-    },
-    "ppo": {
-        "label":      "PPO (Alpha)",
-        "module":     "agents.train_ppo",
-        "fn":         "train_ppo",
+    "hier_ppo": {
+        "label":      "Hier-PPO (Alpha v6)",
+        "module":     "agents.train_ppo_risk_aware",
+        "fn":         "train_ppo_risk_aware",
         "fn_kwargs":  {"safe_reward": False},
-        "model_file": "models/ppo_portfolio.zip",
+        "model_file": "models/hier_ppo_portfolio.zip",
     },
-    "safe_ppo": {
-        "label":      "Safe PPO (Risk-Aware)",
-        "module":     "agents.train_safe_ppo",
-        "fn":         "train_safe_ppo",
+    "safe_hier_ppo": {
+        "label":      "Safe-Hier-PPO (Risk-Aware v6)",
+        "module":     "agents.train_ppo_risk_aware",
+        "fn":         "train_ppo_risk_aware",
+        "fn_kwargs":  {"safe_reward": True},
+        "model_file": "models/safe_hier_ppo_portfolio.zip",
+    },
+    "dqn_risk_aware": {
+        "label":      "DQN Risk-Aware (Dist. v6)",
+        "module":     "agents.train_dqn_risk_aware",
+        "fn":         "train_dqn_risk_aware",
         "fn_kwargs":  {},
-        "model_file": "models/safe_ppo_portfolio.zip",
+        "model_file": "models/dqn_risk_aware_portfolio.zip",
     },
 }
 
@@ -88,7 +90,7 @@ def run_build_dataset() -> bool:
     log(_sep())
     t0 = time.time()
     try:
-        m  = importlib.import_module("data_pipeline.build_dataset")
+        m = importlib.import_module("data_pipeline.build_dataset")
         m.build_full_pipeline(use_cached_raw=False)
         log(f"  ✓  Dataset built  ({_fmt(time.time()-t0)})")
         return True
@@ -107,7 +109,7 @@ def run_validate_dataset() -> bool:
         ok = m.main()
         status = "✓  Validation passed" if ok else "⚠  Validation warnings (check log)"
         log(f"  {status}")
-        return True   # don't abort on warnings
+        return True
     except Exception as exc:
         log(f"  ⚠  Validation error: {exc}")
         return True   # non-fatal
@@ -120,8 +122,8 @@ def run_agent(key: str) -> tuple:
     log(_sep("-"))
     t0 = time.time()
     try:
-        m      = importlib.import_module(cfg["module"])
-        fn     = getattr(m, cfg["fn"])
+        m       = importlib.import_module(cfg["module"])
+        fn      = getattr(m, cfg["fn"])
         fn(**cfg.get("fn_kwargs", {}))
         elapsed = time.time() - t0
         log(f"  ✓  {cfg['label']} finished  ({_fmt(elapsed)})")
@@ -153,17 +155,17 @@ def main(
     skip_existing: bool = False,
     run_eval: bool = True,
 ) -> None:
-    # Start fresh log
+    os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
     with open(LOG_FILE, "w", encoding="utf-8") as f:
         f.write("")
 
     wall_start = time.time()
 
     log(_sep())
-    log("  SAFE RL PORTFOLIO — FULL PIPELINE  (v2)")
+    log("  SAFE RL PORTFOLIO — FULL PIPELINE  (v3 Risk-Aware)")
     log(_sep())
 
-    # ── Device check ─────────────────────────────────────────────────────────
+    # ── Device check ──────────────────────────────────────────────────────────
     try:
         import torch
         if torch.cuda.is_available():
@@ -173,7 +175,7 @@ def main(
     except ImportError:
         log("  ⚠   torch not importable — SB3 will manage device")
 
-    # ── Step 1-2: Dataset ─────────────────────────────────────────────────────
+    # ── Steps 1-2: Dataset ────────────────────────────────────────────────────
     if skip_build:
         log("\n  Skipping dataset build (--skip-build).")
         train_csv = os.path.join(PROJECT_ROOT, "data", "train_dataset.csv")
@@ -198,7 +200,7 @@ def main(
             continue
         if skip_existing and _model_exists(key):
             skipped.append(key)
-            log(f"  ~  {AGENTS[key]['label']:<30} already trained — skipping")
+            log(f"  ~  {AGENTS[key]['label']:<35} already trained — skipping")
         else:
             to_train.append(key)
 
@@ -217,9 +219,9 @@ def main(
         status = "✓ Done  " if ok else "✗ FAILED"
         if not ok:
             all_ok = False
-        log(f"  {status}  {AGENTS[key]['label']:<30}  {_fmt(elapsed)}")
+        log(f"  {status}  {AGENTS[key]['label']:<35}  {_fmt(elapsed)}")
     for key in skipped:
-        log(f"  ~ Skip   {AGENTS[key]['label']:<30}  (model existed)")
+        log(f"  ~ Skip   {AGENTS[key]['label']:<35}  (model existed)")
     log(f"\n  Total wall time: {_fmt(time.time() - wall_start)}")
 
     # ── Step 6: Evaluate ──────────────────────────────────────────────────────
@@ -243,7 +245,7 @@ def main(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Run the full Safe RL portfolio pipeline.",
+        description="Run the full Safe RL portfolio pipeline (v3 risk-aware agents).",
         formatter_class=argparse.RawTextHelpFormatter,
     )
     parser.add_argument(
@@ -252,7 +254,12 @@ if __name__ == "__main__":
         default=list(AGENTS.keys()),
         choices=list(AGENTS.keys()),
         metavar="AGENT",
-        help="Agents to train (default: dqn ppo safe_ppo).",
+        help=(
+            "Agents to train (default: all).\n"
+            "  hier_ppo        — Hierarchical PPO (multi-objective reward)\n"
+            "  safe_hier_ppo   — Safe Hierarchical PPO (Lagrangian constraint)\n"
+            "  dqn_risk_aware  — Distributional DQN with hierarchical action filter"
+        ),
     )
     parser.add_argument(
         "--build",

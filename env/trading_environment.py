@@ -1,6 +1,6 @@
 """
-trading_environment.py  (v8 — Simplified, No Regime Features)
---------------------------------------------------------------
+trading_environment.py  (v9 — Risk-Aware Agent Compatible)
+-----------------------------------------------------------
 RL trading environment using only technical indicators.
 
 Architecture change from v7
@@ -39,6 +39,17 @@ Architecture change from v7
   V8-8 : Episode length = 255 steps (≈1 trading year).
          random_start = True during training.
 
+  V9-1 : Exports PRICE_DIM / INDIC_DIM / CORR_DIM stream-split constants
+         for use by MultiStreamExtractor in the risk-aware agents.
+         Split of the 43-dim obs:
+           return + MA20 per asset (price stream)  = N_ASSETS × 2 = 14
+           MA50 + RSI + vol per asset (indic stream)= N_ASSETS × 3 = 21
+           weights + norm_value   (portfolio stream) =             8
+           ─────────────────────────────────────────────────────────
+           Total                                                   43
+
+  V9-2 : set_hard_starts() stub for ScenarioSamplerCallback (Paper 5).
+
 Backward-compat
 ---------------
   Constructor accepts (and silently ignores) legacy kwargs from v7:
@@ -65,6 +76,12 @@ N_ASSET_FEAT    = len(_ASSET_FEATURES)   # 5
 # Observation: 35 indicators + 7 weights + 1 value = 43
 OBS_DIM = N_ASSETS * N_ASSET_FEAT + N_ASSETS + 1   # 43
 
+# ── MultiStreamExtractor split (V9-1) ─────────────────────────────────────────
+# Obs layout: [return,MA20 per asset] [MA50,RSI,vol per asset] [weights,norm]
+PRICE_DIM = N_ASSETS * 2                       # return + MA20      → 14
+INDIC_DIM = N_ASSETS * 3                       # MA50 + RSI + vol   → 21
+CORR_DIM  = OBS_DIM - PRICE_DIM - INDIC_DIM   # weights + norm_val →  8
+
 # ── Defaults ──────────────────────────────────────────────────────────────────
 DEFAULT_INITIAL_VALUE    = 100_000.0
 DEFAULT_TRANSACTION_COST = 0.001
@@ -90,13 +107,13 @@ MOM_WINDOW       = 60
 
 class PortfolioTradingEnv(gym.Env):
     """
-    Multi-Asset RL Portfolio Environment  (v8).
+    Multi-Asset RL Portfolio Environment  (v9).
 
     Observation (43 dims)
     ---------------------
-    [BTC_return … Sensex_volatility]  (35)
-    [w_BTC … w_Sensex]               (7)
-    [norm_portfolio_value]            (1)
+    [BTC_return, BTC_MA20 … Sensex_MA20]  price stream   (PRICE_DIM = 14)
+    [BTC_MA50, BTC_RSI, BTC_vol … Sensex_vol] indic stream (INDIC_DIM = 21)
+    [w_BTC … w_Sensex, norm_portfolio_value]  portfolio     (CORR_DIM  =  8)
 
     Reward
     ------
@@ -108,6 +125,11 @@ class PortfolioTradingEnv(gym.Env):
     Safe PPO (safe_reward=True):
       market_return >= 0  → same as PPO
       market_return <  0  → 0.5 × portfolio_return − 2 × vol − 3 × drawdown
+
+    V9 additions
+    ------------
+    set_hard_starts(indices) : called by ScenarioSamplerCallback (Paper 5)
+        to bias episode starts toward high-drawdown history windows.
     """
 
     metadata = {"render_modes": ["human"]}
@@ -179,6 +201,9 @@ class PortfolioTradingEnv(gym.Env):
         self._ep_dd_buf   = []
         self._ep_vol_buf  = []
         self._ep_turn_buf = []
+
+        # Hard-start indices set by ScenarioSamplerCallback (V9-2)
+        self._hard_starts: list = []
 
     # ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -358,11 +383,15 @@ class PortfolioTradingEnv(gym.Env):
         super().reset(seed=seed)
 
         max_start = max(0, self.total_rows - MIN_EPISODE_STEPS - 1)
-        self.episode_start = (
-            int(self.np_random.integers(0, max_start))
-            if self.random_start and max_start > 0
-            else 0
-        )
+        if self.random_start and max_start > 0:
+            # With 30 % probability bias toward hard-start windows (V9-2)
+            if self._hard_starts and self.np_random.random() < 0.30:
+                candidate = int(self.np_random.choice(self._hard_starts))
+                self.episode_start = min(candidate, max_start)
+            else:
+                self.episode_start = int(self.np_random.integers(0, max_start))
+        else:
+            self.episode_start = 0
 
         self.current_step    = self.episode_start
         self.portfolio_value = self.initial_value
@@ -480,6 +509,17 @@ class PortfolioTradingEnv(gym.Env):
         }
 
         return next_obs, float(reward), done, False, info
+
+    # ── Hard-start injection (V9-2 / Paper 5) ─────────────────────────────────
+
+    def set_hard_starts(self, indices: list) -> None:
+        """Store episode-start row indices that correspond to high-drawdown windows.
+
+        Called by ScenarioSamplerCallback via env_method().  reset() samples
+        from these with 30 % probability when random_start=True.
+        """
+        valid = [i for i in indices if 0 <= i < max(0, self.total_rows - MIN_EPISODE_STEPS - 1)]
+        self._hard_starts = valid
 
     # ── Debug log ──────────────────────────────────────────────────────────────
 

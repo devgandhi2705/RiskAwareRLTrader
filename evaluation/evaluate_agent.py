@@ -1,7 +1,14 @@
 """
-evaluate_agent.py  (v3 — No Regime Features)
----------------------------------------------
-Evaluates DQN, PPO, and Safe PPO against classic baselines on 2023–2024 test data.
+evaluate_agent.py  (v4 — Risk-Aware Hierarchical Agents)
+---------------------------------------------------------
+Evaluates the v6 risk-aware agents (Hier-PPO, Safe-Hier-PPO, DQN Risk-Aware)
+against classic baselines on 2023–2024 test data.
+
+Agents evaluated
+----------------
+  hier_ppo_portfolio         : Hierarchical PPO (multi-objective reward)
+  safe_hier_ppo_portfolio    : Safe Hierarchical PPO (Lagrangian constraint)
+  dqn_risk_aware_portfolio   : Distributional DQN with hierarchical action filter
 
 Metrics computed
 ----------------
@@ -18,8 +25,9 @@ Plots saved
   drawdown_curves.png
   rolling_sharpe.png
   metrics_comparison.png
+  allocation_<agent>.png  (per agent)
 
-Logs to: evaluation_log.txt
+Logs to: logs/evaluation_log.txt
 
 Run:
     python evaluation/evaluate_agent.py
@@ -43,6 +51,7 @@ from pathlib import Path
 _THIS_DIR    = Path(__file__).resolve().parent
 PROJECT_ROOT = _THIS_DIR.parent
 sys.path.insert(0, str(PROJECT_ROOT))
+sys.path.insert(0, str(PROJECT_ROOT / "agents"))
 
 from env.trading_environment import PortfolioTradingEnv, ASSETS, N_ASSETS
 
@@ -51,6 +60,7 @@ LOG_FILE = PROJECT_ROOT / "logs" / "evaluation_log.txt"
 
 def log(msg: str) -> None:
     print(msg)
+    os.makedirs(str(LOG_FILE.parent), exist_ok=True)
     with open(str(LOG_FILE), "a", encoding="utf-8") as f:
         f.write(msg + "\n")
 
@@ -59,30 +69,35 @@ TEST_DATA_PATH = PROJECT_ROOT / "data"    / "test_dataset.csv"
 MODEL_DIR      = PROJECT_ROOT / "models"
 RESULTS_DIR    = PROJECT_ROOT / "results"
 
+# ── Agent registry ─────────────────────────────────────────────────────────────
+# algo_variant: "PPO_HIER" | "SAFE_PPO_HIER" | "DQN_RISK"
 AGENT_CONFIGS = {
-    "dqn": {
-        "label":        "DQN (Baseline)",
-        "algo":         "DQN",
-        "safe_reward":  False,
-        "model_path":   str(MODEL_DIR / "dqn_portfolio"),
-        "vecnorm_path": None,
-        "color":        "#4C72B0",
-    },
-    "ppo": {
-        "label":        "PPO (Alpha)",
+    "hier_ppo": {
+        "label":        "Hier-PPO (Alpha v6)",
         "algo":         "PPO",
+        "algo_variant": "PPO_HIER",
         "safe_reward":  False,
-        "model_path":   str(MODEL_DIR / "ppo_portfolio"),
-        "vecnorm_path": str(MODEL_DIR / "ppo_portfolio_vecnorm.pkl"),
+        "model_path":   str(MODEL_DIR / "hier_ppo_portfolio"),
+        "vecnorm_path": str(MODEL_DIR / "hier_ppo_portfolio_vecnorm.pkl"),
         "color":        "#DD8452",
     },
-    "safe_ppo": {
-        "label":        "Safe PPO (Risk-Aware)",
+    "safe_hier_ppo": {
+        "label":        "Safe-Hier-PPO (Risk-Aware)",
         "algo":         "PPO",
+        "algo_variant": "SAFE_PPO_HIER",
         "safe_reward":  True,
-        "model_path":   str(MODEL_DIR / "safe_ppo_portfolio"),
-        "vecnorm_path": str(MODEL_DIR / "safe_ppo_portfolio_vecnorm.pkl"),
+        "model_path":   str(MODEL_DIR / "safe_hier_ppo_portfolio"),
+        "vecnorm_path": str(MODEL_DIR / "safe_hier_ppo_portfolio_vecnorm.pkl"),
         "color":        "#55A868",
+    },
+    "dqn_risk_aware": {
+        "label":        "DQN Risk-Aware (Dist. v6)",
+        "algo":         "DQN",
+        "algo_variant": "DQN_RISK",
+        "safe_reward":  False,
+        "model_path":   str(MODEL_DIR / "dqn_risk_aware_portfolio"),
+        "vecnorm_path": None,
+        "color":        "#4C72B0",
     },
 }
 
@@ -170,11 +185,11 @@ def equal_weight_strategy(df):
 
 
 def risk_parity_strategy(df):
-    cols      = _ret_cols(df)
-    ret_mat   = df[cols].fillna(0.0).values
+    cols       = _ret_cols(df)
+    ret_mat    = df[cols].fillna(0.0).values
     n_days, na = ret_mat.shape
-    vals      = [100_000.0]; rets = []; turns = []; wh = []
-    w_prev    = np.ones(na) / na
+    vals       = [100_000.0]; rets = []; turns = []; wh = []
+    w_prev     = np.ones(na) / na
 
     for t in range(n_days):
         if t % 21 == 0 and t >= 60:
@@ -236,6 +251,37 @@ def momentum_strategy(df):
     )
 
 
+# ── Eval env builders ──────────────────────────────────────────────────────────
+
+def _build_eval_env_ppo(df, safe_reward):
+    """Wrap base env with HierarchicalWrapper to match training obs space (46 dims)."""
+    from train_ppo_risk_aware import HierarchicalWrapper, MultiObjectiveRewardWrapper
+    base = PortfolioTradingEnv(df, safe_reward=safe_reward, random_start=False)
+    env  = MultiObjectiveRewardWrapper(base)
+    env  = HierarchicalWrapper(env)
+    return env, base
+
+
+def _build_eval_env_dqn(df):
+    """Wrap base env to match DQN training stack (Hierarchical + Discrete)."""
+    from train_ppo_risk_aware import HierarchicalWrapper, MultiObjectiveRewardWrapper
+    from train_dqn_risk_aware import DiscretePortfolioWrapper
+
+    at_path = str(MODEL_DIR / "dqn_risk_action_table.npy")
+    if not os.path.isfile(at_path):
+        raise FileNotFoundError(
+            f"DQN action table not found: {at_path}\n"
+            "Run agents/train_dqn_risk_aware.py first."
+        )
+    action_table = np.load(at_path)
+
+    base = PortfolioTradingEnv(df, safe_reward=False, random_start=False)
+    env  = MultiObjectiveRewardWrapper(base)
+    env  = HierarchicalWrapper(env)
+    env  = DiscretePortfolioWrapper(env, action_table)
+    return env, base
+
+
 # ── RL agent rollout ───────────────────────────────────────────────────────────
 
 def run_rl_episode(agent_key, cfg, df):
@@ -248,33 +294,27 @@ def run_rl_episode(agent_key, cfg, df):
         log(f"  ! Model not found: {model_zip} — skipping {agent_key}")
         return None
 
+    variant   = cfg["algo_variant"]
     AlgoClass = DQN if cfg["algo"] == "DQN" else PPO
     model     = AlgoClass.load(cfg["model_path"])
-    log(f"  + Loaded {cfg['algo']} from {model_zip}")
+    log(f"  + Loaded {cfg['algo']} ({variant}) from {model_zip}")
 
+    # ── Build eval env matching the training wrapper stack ─────────────────────
     vecnorm = None
-    vn_path = cfg.get("vecnorm_path")
-    if vn_path and os.path.isfile(vn_path):
-        dummy   = DummyVecEnv([lambda: Monitor(
-            PortfolioTradingEnv(df, safe_reward=cfg["safe_reward"],
-                                random_start=False)
-        )])
-        vecnorm = VecNormalize.load(vn_path, dummy)
-        vecnorm.training    = False
-        vecnorm.norm_reward = False
-
-    base_env = PortfolioTradingEnv(
-        df, safe_reward=cfg["safe_reward"], random_start=False
-    )
-
-    if cfg["algo"] == "DQN":
-        at_path = os.path.join(str(MODEL_DIR), "dqn_action_table.npy")
-        if not os.path.isfile(at_path):
-            raise FileNotFoundError("DQN action table missing — run train_dqn.py first.")
-        from agents.train_dqn import DiscretePortfolioWrapper
-        env = DiscretePortfolioWrapper(base_env, np.load(at_path))
+    if variant in ("PPO_HIER", "SAFE_PPO_HIER"):
+        env, base_env = _build_eval_env_ppo(df, cfg["safe_reward"])
+        vn_path = cfg.get("vecnorm_path")
+        if vn_path and os.path.isfile(vn_path):
+            dummy   = DummyVecEnv([lambda: Monitor(
+                _build_eval_env_ppo(df, cfg["safe_reward"])[0]
+            )])
+            vecnorm = VecNormalize.load(vn_path, dummy)
+            vecnorm.training    = False
+            vecnorm.norm_reward = False
+    elif variant == "DQN_RISK":
+        env, base_env = _build_eval_env_dqn(df)
     else:
-        env = base_env
+        raise ValueError(f"Unknown algo_variant: {variant}")
 
     obs, _   = env.reset()
     done     = False
@@ -287,10 +327,10 @@ def run_rl_episode(agent_key, cfg, df):
         action, _ = model.predict(obs_in, deterministic=True)
         obs, _, done, trunc, info = env.step(action)
         done = done or trunc
-        vals.append(info["portfolio_value"])
-        rets.append(info["net_return"])
-        turns.append(info["turnover"])
-        weights_h.append(info["weights"])
+        vals.append(info.get("portfolio_value", vals[-1]))
+        rets.append(info.get("net_return",       0.0))
+        turns.append(info.get("turnover",        0.0))
+        weights_h.append(info.get("weights",     []))
 
     n     = min(len(df), len(vals))
     dates = df.index[:n]
@@ -407,7 +447,6 @@ def evaluate_all(agent_keys=None):
     agent_keys : list[str] | None
         Subset of AGENT_CONFIGS keys. None = all.
     """
-    # Clear log
     with open(str(LOG_FILE), "w", encoding="utf-8") as f:
         f.write("")
 
@@ -450,9 +489,7 @@ def evaluate_all(agent_keys=None):
         res = run_rl_episode(key, AGENT_CONFIGS[key], df)
         if res:
             _add(res)
-            _plot_allocation(
-                res, RESULTS_DIR / f"allocation_{key}.png"
-            )
+            _plot_allocation(res, RESULTS_DIR / f"allocation_{key}.png")
 
     metrics_df = pd.DataFrame(rows)
     log("\n" + "─" * 80)
@@ -463,10 +500,9 @@ def evaluate_all(agent_keys=None):
     metrics_df.to_csv(str(csv_path), index=False)
     log(f"\nMetrics saved → {csv_path}")
 
-    # Plots
-    _plot_values(all_results,        RESULTS_DIR / "portfolio_value_curves.png")
-    _plot_drawdowns(all_results,     RESULTS_DIR / "drawdown_curves.png")
-    _plot_rolling_sharpe(all_results,RESULTS_DIR / "rolling_sharpe.png")
+    _plot_values(all_results,         RESULTS_DIR / "portfolio_value_curves.png")
+    _plot_drawdowns(all_results,      RESULTS_DIR / "drawdown_curves.png")
+    _plot_rolling_sharpe(all_results, RESULTS_DIR / "rolling_sharpe.png")
     if len(rows) >= 2:
         _plot_metrics_bar(metrics_df, RESULTS_DIR / "metrics_comparison.png")
 
