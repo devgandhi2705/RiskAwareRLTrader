@@ -35,3 +35,110 @@ Training for 1,000,000 timesteps …
   [Scenario @ 140,000]  Hard transitions tracked: 20437
   [Scenario @ 150,000]  Hard transitions tracked: 21752
   [Scenario @ 160,000]  Hard transitions tracked: 23092
+  [Scenario @ 170,000]  Hard transitions tracked: 24501
+  [Scenario @ 180,000]  Hard transitions tracked: 25890
+  [Scenario @ 190,000]  Hard transitions tracked: 27211
+  [Scenario @ 200,000]  Hard transitions tracked: 28416
+  [Scenario @ 210,000]  Hard transitions tracked: 29894
+  [Scenario @ 220,000]  Hard transitions tracked: 31416
+  [Scenario @ 230,000]  Hard transitions tracked: 32826
+  [Scenario @ 240,000]  Hard transitions tracked: 34160
+  [Scenario @ 250,000]  Hard transitions tracked: 35427
+  [Scenario @ 260,000]  Hard transitions tracked: 36859
+  [Scenario @ 270,000]  Hard transitions tracked: 38120
+  [Scenario @ 280,000]  Hard transitions tracked: 39558
+  [Scenario @ 290,000]  Hard transitions tracked: 41093
+  [Scenario @ 300,000]  Hard transitions tracked: 42423
+  [Scenario @ 310,000]  Hard transitions tracked: 43684
+  [Scenario @ 320,000]  Hard transitions tracked: 45114
+  [Scenario @ 330,000]  Hard transitions tracked: 46656
+  [Scenario @ 340,000]  Hard transitions tracked: 48198
+  [Scenario @ 350,000]  Hard transitions tracked: 49855
+  [Scenario @ 360,000]  Hard transitions tracked: 51061
+  [Scenario @ 370,000]  Hard transitions tracked: 52304
+  [Scenario @ 380,000]  Hard transitions tracked: 53728
+  [Scenario @ 390,000]  Hard transitions tracked: 55144
+  [Scenario @ 400,000]  Hard transitions tracked: 56474
+  [Scenario @ 410,000]  Hard transitions tracked: 57931
+  [Scenario @ 420,000]  Hard transitions tracked: 59227
+  [Scenario @ 430,000]  Hard transitions tracked: 60354
+  [Scenario @ 440,000]  Hard transitions tracked: 61800
+  [Scenario @ 450,000]  Hard transitions tracked: 63245
+  [Scenario @ 460,000]  Hard transitions tracked: 64673
+  [Scenario @ 470,000]  Hard transitions tracked: 66066
+  [Scenario @ 480,000]  Hard transitions tracked: 67511
+  [Scenario @ 490,000]  Hard transitions tracked: 68953
+  [Scenario @ 500,000]  Hard transitions tracked: 70222
+  [Scenario @ 510,000]  Hard transitions tracked: 71647
+  [Scenario @ 520,000]  Hard transitions tracked: 72987
+  [Scenario @ 530,000]  Hard transitions tracked: 74388
+  [Scenario @ 540,000]  Hard transitions tracked: 75449
+  [Scenario @ 550,000]  Hard transitions tracked: 76798
+  [Scenario @ 560,000]  Hard transitions tracked: 78158
+  [Scenario @ 570,000]  Hard transitions tracked: 79668
+  [Scenario @ 580,000]  Hard transitions tracked: 81050
+  [Scenario @ 590,000]  Hard transitions tracked: 82454
+  [Scenario @ 600,000]  Hard transitions tracked: 83896
+  [Scenario @ 610,000]  Hard transitions tracked: 85268
+  [Scenario @ 620,000]  Hard transitions tracked: 86740
+  [Scenario @ 630,000]  Hard transitions tracked: 88206
+  [Scenario @ 640,000]  Hard transitions tracked: 89677
+  [Scenario @ 650,000]  Hard transitions tracked: 91056
+  [Scenario @ 660,000]  Hard transitions tracked: 92354
+  [Scenario @ 670,000]  Hard transitions tracked: 93752
+  [Scenario @ 680,000]  Hard transitions tracked: 95339
+  [Scenario @ 690,000]  Hard transitions tracked: 96646
+  [Scenario @ 700,000]  Hard transitions tracked: 98134
+  [Scenario @ 710,000]  Hard transitions tracked: 99488
+  [Scenario @ 720,000]  Hard transitions tracked: 100996
+  [Scenario @ 730,000]  Hard transitions tracked: 102463
+  [Scenario @ 740,000]  Hard transitions tracked: 103808
+  [Scenario @ 750,000]  Hard transitions tracked: 105010
+  [Scenario @ 760,000]  Hard transitions tracked: 106496
+  [Scenario @ 770,000]  Hard transitions tracked: 107993
+  [Scenario @ 780,000]  Hard transitions tracked: 109388
+  [Scenario @ 790,000]  Hard transitions tracked: 110759
+  [Scenario @ 800,000]  Hard transitions tracked: 112171
+  [Scenario @ 810,000]  Hard transitions tracked: 113518
+  [Scenario @ 820,000]  Hard transitions tracked: 114908
+  [Scenario @ 830,000]  Hard transitions tracked: 116374
+  [Scenario @ 840,000]  Hard transitions tracked: 117565
+  [Scenario @ 850,000]  Hard transitions tracked: 119054
+  [Scenario @ 860,000]  Hard transitions tracked: 120482
+  [Scenario @ 870,000]  Hard transitions tracked: 121715
+  [Scenario @ 880,000]  Hard transitions tracked: 123015
+  [Scenario @ 890,000]  Hard transitions tracked: 124299
+  [Scenario @ 900,000]  Hard transitions tracked: 125555
+  [Scenario @ 910,000]  Hard transitions tracked: 126935
+  [Scenario @ 920,000]  Hard transitions tracked: 128373
+  [Scenario @ 930,000]  Hard transitions tracked: 129762
+  [Scenario @ 940,000]  Hard transitions tracked: 131230
+  [Scenario @ 950,000]  Hard transitions tracked: 132795
+  [Scenario @ 960,000]  Hard transitions tracked: 133985
+  [Scenario @ 970,000]  Hard transitions tracked: 135309
+  [Scenario @ 980,000]  Hard transitions tracked: 136617
+  [Scenario @ 990,000]  Hard transitions tracked: 137876
+  [Scenario @ 1,000,000]  Hard transitions tracked: 139280
+DQN risk-aware training complete in 139.7 min.
+Model saved        → C:\Users\Dev Gandhi\Downloads\project\models\dqn_risk_aware_portfolio.zip
+Action table saved → C:\Users\Dev Gandhi\Downloads\project\models\dqn_risk_action_table.npy
+Training curve saved → C:\Users\Dev Gandhi\Downloads\project\results\dqn_risk_train_curve.png
+  ✓  DQN Risk-Aware (Dist. v6) finished  (2:19:49)
+
+══════════════════════════════════════════════════════════════
+  TRAINING SUMMARY
+══════════════════════════════════════════════════════════════
+  ✓ Done    DQN Risk-Aware (Dist. v6)            2:19:49
+  ~ Skip   Hier-PPO (Alpha v6)                  (model existed)
+  ~ Skip   Safe-Hier-PPO (Risk-Aware v6)        (model existed)
+
+  Total wall time: 2:19:52
+
+══════════════════════════════════════════════════════════════
+  Final step: Evaluating agents …
+══════════════════════════════════════════════════════════════
+
+  All steps completed successfully.
+
+  Log saved → C:\Users\Dev Gandhi\Downloads\project\logs\training_log.txt
+
