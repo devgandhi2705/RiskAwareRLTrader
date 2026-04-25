@@ -1,0 +1,16 @@
+Agent,Regime,Return (%),Sharpe,Max Drawdown (%),N Days
+Equal Weight,Bull,48.26,1.897,6.97,454
+Equal Weight,Neutral,24.99,2.008,7.52,201
+Equal Weight,Bear,-2.09,-0.524,7.79,75
+Risk Parity,Bull,35.65,2.314,5.03,454
+Risk Parity,Neutral,18.65,2.08,6.01,201
+Risk Parity,Bear,-0.21,-0.084,4.05,75
+Momentum (60d),Bull,53.83,1.148,14.71,454
+Momentum (60d),Neutral,41.54,2.246,12.27,201
+Momentum (60d),Bear,0.47,0.203,3.57,75
+DQN (Baseline),Bull,7.65,0.583,14.14,129
+DQN (Baseline),Neutral,22.95,1.393,15.28,123
+PPO (Baseline),Bull,15.62,1.527,8.18,129
+PPO (Baseline),Neutral,28.55,2.04,11.33,123
+Safe PPO (Risk-Aware),Bull,10.24,1.418,7.55,129
+Safe PPO (Risk-Aware),Neutral,17.97,1.585,10.61,123

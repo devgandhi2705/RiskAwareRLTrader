@@ -1,0 +1,7 @@
+Agent,Total Return (%),Sharpe Ratio,Sortino Ratio,Max Drawdown (%),CVaR (%),Ann. Volatility (%),Avg Turnover
+Equal Weight,97.58,1.696,2.543,11.26,-1.95,14.49,0.0
+Risk Parity,69.53,1.989,2.641,8.5,-1.32,9.39,0.0048
+Momentum (60d),139.83,1.378,1.846,14.71,-3.52,24.01,0.0307
+DQN (Baseline),29.89,1.024,1.664,16.73,-3.8,29.88,0.0045
+PPO (Baseline),50.86,1.794,2.955,11.33,-3.04,24.62,0.0466
+Safe PPO (Risk-Aware),30.19,1.476,2.473,10.61,-2.41,19.11,0.0525

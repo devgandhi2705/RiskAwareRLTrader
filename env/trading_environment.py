@@ -1,59 +1,30 @@
 """
-trading_environment.py  (v9 — Risk-Aware Agent Compatible)
------------------------------------------------------------
-RL trading environment using only technical indicators.
+trading_environment.py  (v3 — Regime-Aware)
+--------------------------------------------
+Regime-Aware Safe RL environment for multi-asset portfolio management.
 
-Architecture change from v7
----------------------------
-  V8-1 : Observation vector reduced from 53 → 43 dims.
-         No regime probability or global regime features.
-         Layout:
-           7 × 5 indicator features  = 35
-           7 portfolio weights        =  7
-           1 normalised portfolio val =  1
-           ─────────────────────────────
-           Total                     = 43
+New in v3
+---------
+  R1 : market_regime, trend_strength, market_volatility added to state space
+  R2 : observation_space updated to reflect 3 extra features
+  R3 : regime-conditional risk_multiplier scales safe penalties
+  R4 : bull-market exposure bonus in safe reward
+  R5 : CVaR tail-risk penalty using rolling 50-step deque
+  R7 : regime debug logging via debug_reward flag
+  Backward-compatible: safe_reward=False reverts to plain PPO reward
 
-  V8-2 : max_weight raised 0.40 → 0.90 for aggressive allocation.
-
-  V8-3 : Action smoothing removed (ACTION_SMOOTH = 0).
-
-  V8-4 : Turnover penalty = 0.0025 × turnover.
-
-  V8-5 : PPO reward (safe_reward=False):
-           portfolio_return
-         + 0.5 × (portfolio_return − momentum_return)
-         − 0.0025 × turnover
-         where momentum_return = return of 60d-momentum weighted portfolio
-         based on past asset returns in the current row.
-
-  V8-6 : Safe PPO reward (safe_reward=True) — market-return switched:
-         market_return >= 0  (bull/neutral):
-             same formula as PPO
-         market_return < 0   (bear):
-             0.5 × portfolio_return − 2 × volatility − 3 × drawdown
-
-  V8-7 : market_return = SPY_return (proxy for broad market).
-         Falls back to average of all asset returns if SPY absent.
-
-  V8-8 : Episode length = 255 steps (≈1 trading year).
-         random_start = True during training.
-
-  V9-1 : Exports PRICE_DIM / INDIC_DIM / CORR_DIM stream-split constants
-         for use by MultiStreamExtractor in the risk-aware agents.
-         Split of the 43-dim obs:
-           return + MA20 per asset (price stream)  = N_ASSETS × 2 = 14
-           MA50 + RSI + vol per asset (indic stream)= N_ASSETS × 3 = 21
-           weights + norm_value   (portfolio stream) =             8
-           ─────────────────────────────────────────────────────────
-           Total                                                   43
-
-  V9-2 : set_hard_starts() stub for ScenarioSamplerCallback (Paper 5).
-
-Backward-compat
----------------
-  Constructor accepts (and silently ignores) legacy kwargs from v7:
-  bear_prob, cvar_threshold, lambda_dd, lambda_cvar, lambda_vol, etc.
+Previous features retained
+--------------------------
+  S1  : clip+renorm weight constraints
+  S2  : transaction cost on turnover
+  S3  : turnover penalty + gradual penalty warm-up
+  S4  : max position size cap (40%)
+  S7  : drawdown + CVaR penalties with max() guards
+  S8  : volatility penalty
+  S10 : equal-weight init
+  S11 : rebalance frequency gate
+  S16 : action smoothing
+  S17 : randomised episode start
 
 Part of: Safe RL for Risk-Constrained Portfolio Management
 """
@@ -65,71 +36,77 @@ from gymnasium import spaces
 from collections import deque
 
 
-# ── Asset / Feature Configuration ─────────────────────────────────────────────
+# ── Asset / Feature Configuration ────────────────────────────────────────────
 ASSETS   = ["BTC", "ETH", "SPY", "GLD", "Silver", "Nifty50", "Sensex"]
 N_ASSETS = len(ASSETS)
 
-# 5 indicator features per asset, in order
-_ASSET_FEATURES = ["return", "MA20", "MA50", "RSI", "volatility"]
-N_ASSET_FEAT    = len(_ASSET_FEATURES)   # 5
+BASE_FEATURES  = ["Close", "Return", "RSI"]
+EXTRA_FEATURES = ["MA20", "Volatility"]   # only BTC, ETH in this dataset
 
-# Observation: 35 indicators + 7 weights + 1 value = 43
-OBS_DIM = N_ASSETS * N_ASSET_FEAT + N_ASSETS + 1   # 43
-
-# ── MultiStreamExtractor split (V9-1) ─────────────────────────────────────────
-# Obs layout: [return,MA20 per asset] [MA50,RSI,vol per asset] [weights,norm]
-PRICE_DIM = N_ASSETS * 2                       # return + MA20      → 14
-INDIC_DIM = N_ASSETS * 3                       # MA50 + RSI + vol   → 21
-CORR_DIM  = OBS_DIM - PRICE_DIM - INDIC_DIM   # weights + norm_val →  8
+N_PORTFOLIO_FEATURES = N_ASSETS + 1       # weights + normalised value
+N_REGIME_FEATURES    = 3                  # R1: regime, trend_strength, market_vol
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
-DEFAULT_INITIAL_VALUE    = 100_000.0
-DEFAULT_TRANSACTION_COST = 0.001
-DEFAULT_MAX_WEIGHT       = 0.90          # V8-2: raised from 0.40
-DEFAULT_REBALANCE_FREQ   = 1             # rebalance every step (no gate)
-DEFAULT_RANDOM_START     = True
-MIN_EPISODE_STEPS        = 255           # V8-8: ≈1 trading year
-TAIL_RISK_WINDOW         = 50
+DEFAULT_INITIAL_VALUE      = 100_000.0
+DEFAULT_TRANSACTION_COST   = 0.001
+DEFAULT_TURNOVER_LAMBDA    = 0.001
+DEFAULT_MAX_WEIGHT         = 0.40
+DEFAULT_CVAR_WINDOW        = 30
+DEFAULT_CVAR_ALPHA         = 0.05
+DEFAULT_MAX_DD_THRESHOLD   = 0.20
+DEFAULT_CVAR_THRESHOLD     = -0.05
+DEFAULT_LAMBDA_DD          = 0.5
+DEFAULT_LAMBDA_CVAR        = 0.5
+DEFAULT_LAMBDA_VOL         = 0.1
+DEFAULT_REBALANCE_FREQ     = 5
+DEFAULT_ACTION_SMOOTH      = 0.3
+DEFAULT_RANDOM_START       = True
+DEFAULT_RISK_PENALTY_SCALE = 0.1
+MIN_EPISODE_STEPS          = 252
 
-# ── V8 Reward constants ────────────────────────────────────────────────────────
-TURNOVER_PEN     = 0.0025    # V8-4
-MOM_ALPHA        = 0.5       # V8-5: momentum excess return weight
-BEAR_BASE_SCALE  = 0.5       # V8-6: bear-mode base return weight
-BEAR_VOL_PEN     = 2.0       # V8-6
-BEAR_DD_PEN      = 3.0       # V8-6
+# R3: regime → risk multiplier mapping
+REGIME_RISK_MULTIPLIER = {
+     1: 0.1,   # Bull  — nearly no penalties, let agent be aggressive
+     0: 0.5,   # Neutral — moderate constraints
+    -1: 1.0,   # Bear  — full penalties, strong risk control
+}
 
-# SPY column used as market proxy for bear detection
-SPY_RETURN_COL   = "SPY_return"
+# R4: bull exposure bonus weight
+BULL_EXPOSURE_BONUS = 0.05
 
-# Lookback window for 60-day momentum weights (in steps)
-MOM_WINDOW       = 60
+# R5: tail-risk CVaR window
+TAIL_RISK_WINDOW = 50
 
 
 class PortfolioTradingEnv(gym.Env):
     """
-    Multi-Asset RL Portfolio Environment  (v9).
+    Regime-Aware Portfolio Management MDP.
 
-    Observation (43 dims)
-    ---------------------
-    [BTC_return, BTC_MA20 … Sensex_MA20]  price stream   (PRICE_DIM = 14)
-    [BTC_MA50, BTC_RSI, BTC_vol … Sensex_vol] indic stream (INDIC_DIM = 21)
-    [w_BTC … w_Sensex, norm_portfolio_value]  portfolio     (CORR_DIM  =  8)
+    Observation layout
+    ------------------
+    [ market_features (N_ASSETS * 5)
+    | portfolio_weights (N_ASSETS)
+    | norm_portfolio_value (1)
+    | market_regime (1)           <- R1
+    | trend_strength (1)          <- R1
+    | market_volatility (1) ]     <- R1
 
-    Reward
-    ------
-    PPO (safe_reward=False):
-        R = portfolio_return
-          + 0.5 × (portfolio_return − momentum_return)
-          − 0.0025 × turnover
+    Total dims = N_ASSETS*5 + N_ASSETS + 1 + 3
 
-    Safe PPO (safe_reward=True):
-      market_return >= 0  → same as PPO
-      market_return <  0  → 0.5 × portfolio_return − 2 × vol − 3 × drawdown
+    Reward (safe=False)
+    -------------------
+    net_return - turnover_penalty
 
-    V9 additions
-    ------------
-    set_hard_starts(indices) : called by ScenarioSamplerCallback (Paper 5)
-        to bias episode starts toward high-drawdown history windows.
+    Reward (safe=True)
+    ------------------
+    net_return
+      + exposure_bonus            (R4 — bull only)
+      - turnover_penalty
+      - risk_mult * dd_penalty    (R3 — regime-scaled)
+      - risk_mult * cvar_penalty  (R3)
+      - risk_mult * vol_penalty   (R3)
+      - tail_cvar_penalty         (R5)
+    All scaled by gradual warm-up factor (over 200k steps).
     """
 
     metadata = {"render_modes": ["human"]}
@@ -140,263 +117,192 @@ class PortfolioTradingEnv(gym.Env):
         safe_reward=False,
         initial_value=DEFAULT_INITIAL_VALUE,
         transaction_cost=DEFAULT_TRANSACTION_COST,
+        turnover_lambda=DEFAULT_TURNOVER_LAMBDA,
         max_weight=DEFAULT_MAX_WEIGHT,
+        cvar_window=DEFAULT_CVAR_WINDOW,
+        cvar_alpha=DEFAULT_CVAR_ALPHA,
+        dd_threshold=DEFAULT_MAX_DD_THRESHOLD,
+        cvar_threshold=DEFAULT_CVAR_THRESHOLD,
+        lambda_dd=DEFAULT_LAMBDA_DD,
+        lambda_cvar=DEFAULT_LAMBDA_CVAR,
+        lambda_vol=DEFAULT_LAMBDA_VOL,
         rebalance_freq=DEFAULT_REBALANCE_FREQ,
+        action_smooth=DEFAULT_ACTION_SMOOTH,
         random_start=DEFAULT_RANDOM_START,
+        risk_penalty_scale=DEFAULT_RISK_PENALTY_SCALE,
         debug_reward=False,
-        # Legacy kwargs silently ignored (backward compat)
-        turnover_lambda=None,
-        lambda_dd=None,
-        lambda_cvar=None,
-        lambda_vol=None,
-        cvar_threshold=None,
-        dd_threshold=None,
-        risk_penalty_scale=None,
-        action_smooth=None,
-        cvar_window=None,
-        cvar_alpha=None,
     ):
         super().__init__()
 
-        self.df               = df.copy().reset_index(drop=True)
-        self.safe_reward      = safe_reward
-        self.initial_value    = initial_value
-        self.transaction_cost = transaction_cost
-        self.max_weight       = max_weight
-        self.rebalance_freq   = rebalance_freq
-        self.random_start     = random_start
-        self.debug_reward     = debug_reward
+        self.df                 = df.copy().reset_index(drop=True)
+        self.safe_reward        = safe_reward
+        self.initial_value      = initial_value
+        self.transaction_cost   = transaction_cost
+        self.turnover_lambda    = turnover_lambda
+        self.max_weight         = max_weight
+        self.cvar_window        = cvar_window
+        self.cvar_alpha         = cvar_alpha
+        self.dd_threshold       = dd_threshold
+        self.cvar_threshold     = cvar_threshold
+        self.lambda_dd          = lambda_dd
+        self.lambda_cvar        = lambda_cvar
+        self.lambda_vol         = lambda_vol
+        self.rebalance_freq     = rebalance_freq
+        self.action_smooth      = action_smooth
+        self.random_start       = random_start
+        self.risk_penalty_scale = risk_penalty_scale
+        self.debug_reward       = debug_reward
 
-        self.total_rows = len(self.df)
+        # ── Feature columns ───────────────────────────────────────────────────
+        self.obs_feature_cols          = []
+        self.obs_feature_dim_per_asset = len(BASE_FEATURES) + len(EXTRA_FEATURES)
 
-        # ── Column lookup ──────────────────────────────────────────────────────
-        # Grouped by feature type so MultiStreamExtractor slices correctly:
-        #   price stream  (14): returns × 7, MA20 × 7
-        #   indic stream  (21): MA50 × 7, RSI × 7, vol × 7
-        #   portfolio     ( 8): weights × 7, norm_val
-        self.return_cols   = [f"{a}_return"     for a in ASSETS]
-        self._price_cols   = ([f"{a}_return"     for a in ASSETS]
-                            + [f"{a}_MA20"       for a in ASSETS])
-        self._indic_cols   = ([f"{a}_MA50"       for a in ASSETS]
-                            + [f"{a}_RSI"        for a in ASSETS]
-                            + [f"{a}_volatility" for a in ASSETS])
+        for asset in ASSETS:
+            for feat in BASE_FEATURES + EXTRA_FEATURES:
+                self.obs_feature_cols.append(f"{asset}_{feat}")
 
-        # ── Spaces ─────────────────────────────────────────────────────────────
+        self.return_cols = [f"{asset}_Return" for asset in ASSETS]
+
+        # R1: verify regime columns present (added by detect_market_regime)
+        self._has_regime = all(
+            c in self.df.columns
+            for c in ["regime", "trend_strength", "market_volatility"]
+        )
+
+        # R2: observation space = market + portfolio + 3 regime features
+        n_market   = N_ASSETS * self.obs_feature_dim_per_asset
+        n_obs      = n_market + N_PORTFOLIO_FEATURES + N_REGIME_FEATURES
         self.observation_space = spaces.Box(
-            low=-np.inf, high=np.inf, shape=(OBS_DIM,), dtype=np.float32
+            low=-np.inf, high=np.inf, shape=(n_obs,), dtype=np.float32
         )
         self.action_space = spaces.Box(
             low=0.0, high=1.0, shape=(N_ASSETS,), dtype=np.float32
         )
 
-        # ── State ──────────────────────────────────────────────────────────────
+        self._compute_norm_stats()
+
+        # Episode state
+        self.current_step    = 0
+        self.episode_start   = 0
         self.portfolio_value = initial_value
         self.peak_value      = initial_value
         self.weights         = np.ones(N_ASSETS, dtype=np.float32) / N_ASSETS
         self.return_history  = []
-        self.tail_risk_buf   = deque(maxlen=TAIL_RISK_WINDOW)
-        self.episode_start   = 0
-        self.current_step    = 0
+        self.tail_risk_buf   = deque(maxlen=TAIL_RISK_WINDOW)  # R5
+        self.total_rows      = len(self.df)
         self._total_steps    = 0
 
-        # Episode debug accumulators
-        self._ep_ret_buf  = []
-        self._ep_dd_buf   = []
-        self._ep_vol_buf  = []
-        self._ep_turn_buf = []
+    # ── Normalisation ─────────────────────────────────────────────────────────
 
-        # Hard-start indices set by ScenarioSamplerCallback (V9-2)
-        self._hard_starts: list = []
+    def _compute_norm_stats(self):
+        all_cols = self.obs_feature_cols + ["trend_strength", "market_volatility"]
+        self._col_mean = {}
+        self._col_std  = {}
+        for col in all_cols:
+            if col in self.df.columns:
+                vals = self.df[col].dropna()
+                self._col_mean[col] = float(vals.mean())
+                std = float(vals.std())
+                self._col_std[col]  = std if std > 1e-8 else 1.0
+            else:
+                self._col_mean[col] = 0.0
+                self._col_std[col]  = 1.0
 
-    # ── Helpers ────────────────────────────────────────────────────────────────
+    def _normalise(self, col, value):
+        return (value - self._col_mean[col]) / self._col_std[col]
 
-    def _safe_val(self, row: pd.Series, col: str, default: float = 0.0) -> float:
-        if col not in row.index:
-            return default
-        try:
-            v = float(row[col])
-            return v if np.isfinite(v) else default
-        except (TypeError, ValueError):
-            return default
+    # ── Weight processing ─────────────────────────────────────────────────────
 
-    # ── Observation ────────────────────────────────────────────────────────────
+    def _process_weights(self, raw_action, prev_weights, apply_smoothing=True):
+        w = np.clip(raw_action, 0.0, 1.0).astype(np.float64)
+        s = w.sum()
+        w = w / s if s > 1e-8 else np.ones(N_ASSETS) / N_ASSETS
 
-    def _get_obs(self, row: pd.Series) -> np.ndarray:
-        """
-        Build the 43-dim observation vector.
+        w = np.minimum(w, self.max_weight)
+        s = w.sum()
+        w = w / s if s > 1e-8 else np.ones(N_ASSETS) / N_ASSETS
 
-        Layout (matches MultiStreamExtractor stream boundaries):
-          price stream  (14): [return×7, MA20×7]
-          indic stream  (21): [MA50×7, RSI×7, vol×7]
-          portfolio     ( 8): [weights×7, norm_value]
-        """
-        price_feats = np.array(
-            [self._safe_val(row, c) for c in self._price_cols],
-            dtype=np.float32,
-        )
-        indic_feats = np.array(
-            [self._safe_val(row, c) for c in self._indic_cols],
-            dtype=np.float32,
-        )
+        if apply_smoothing:
+            w = (1.0 - self.action_smooth) * prev_weights.astype(np.float64) + self.action_smooth * w
+            w = w / w.sum()
 
-        norm_val = float(self.portfolio_value / self.initial_value) - 1.0
-        port_vec = np.append(self.weights, np.float32(norm_val))   # (8,)
-
-        obs = np.concatenate([price_feats, indic_feats, port_vec])
-        obs = np.clip(obs, -1e6, 1e6)
-        return obs.astype(np.float32)
-
-    # ── Action processing ──────────────────────────────────────────────────────
-
-    def _process_weights(self, raw_action: np.ndarray) -> np.ndarray:
-        """
-        Project continuous action → valid portfolio weights.
-
-        1. Clip to [1e-6, max_weight]
-        2. L1-normalise → sum to 1
-        No smoothing (V8-3).
-        """
-        w = np.clip(raw_action.astype(np.float64), 1e-6, self.max_weight)
-        total = w.sum()
-        if total < 1e-8:
-            w = np.ones(N_ASSETS, dtype=np.float64) / N_ASSETS
-        else:
-            w /= total
         return w.astype(np.float32)
 
-    # ── Risk metrics ───────────────────────────────────────────────────────────
+    # ── Observation builder (R1 — adds regime features) ──────────────────────
 
-    def _compute_drawdown(self) -> float:
-        if self.peak_value < 1e-9:
-            return 0.0
-        return max(float((self.peak_value - self.portfolio_value) / self.peak_value), 0.0)
+    def _get_obs(self, step):
+        row = self.df.iloc[step]
+        market_obs = []
 
-    def _compute_portfolio_vol(self) -> float:
-        hist = self.return_history[-20:]
-        return float(np.std(hist)) if len(hist) >= 5 else 0.0
-
-    def _compute_cvar(self) -> float:
-        hist = self.return_history[-30:]
-        if len(hist) < 5:
-            return 0.0
-        r      = np.array(hist)
-        cutoff = np.percentile(r, 5)
-        tail   = r[r <= cutoff]
-        return float(tail.mean()) if len(tail) > 0 else float(cutoff)
-
-    def _compute_tail_cvar(self) -> float:
-        buf = list(self.tail_risk_buf)
-        if len(buf) < 10:
-            return 0.0
-        r     = np.array(buf)
-        worst = r[r <= np.percentile(r, 10)]
-        return float(np.abs(worst.mean())) if len(worst) > 0 else 0.0
-
-    # ── Momentum return helper ─────────────────────────────────────────────────
-
-    def _momentum_return(self, row: pd.Series) -> float:
-        """
-        Compute the 60-day momentum strategy return for this step.
-
-        Uses 60-day cumulative returns per asset to compute weights,
-        then dots with current step's asset returns.
-        The return cols are read from self.df[self.return_cols].
-        """
-        start = max(0, self.current_step - MOM_WINDOW)
-        end   = self.current_step  # exclusive; current row not yet consumed
-
-        if end - start < 10:
-            # Not enough history — use equal weight
-            mom_w = np.ones(N_ASSETS, dtype=np.float64) / N_ASSETS
-        else:
-            window_rets = self.df.iloc[start:end][self.return_cols].fillna(0.0).values
-            cum_rets    = (1 + window_rets).prod(axis=0) - 1.0  # shape (N_ASSETS,)
-            pos_rets    = np.maximum(cum_rets, 0.0)
-            total       = pos_rets.sum()
-            if total < 1e-8:
-                mom_w = np.ones(N_ASSETS, dtype=np.float64) / N_ASSETS
+        for col in self.obs_feature_cols:
+            if col in self.df.columns:
+                raw = row[col]
+                val = (0.0 if (pd.isna(raw) or not np.isfinite(raw))
+                       else self._normalise(col, float(raw)))
             else:
-                mom_w = pos_rets / total
-                mom_w = np.minimum(mom_w, 0.40)
-                mom_w = mom_w / mom_w.sum()
+                val = 0.0
+            market_obs.append(val)
 
-        asset_rets = np.array(
-            [self._safe_val(row, c) for c in self.return_cols],
-            dtype=np.float64,
-        )
-        return float(np.dot(mom_w, asset_rets))
+        portfolio_obs = list(self.weights) + [self.portfolio_value / self.initial_value]
 
-    # ── Reward (V8) ────────────────────────────────────────────────────────────
-
-    def _compute_reward(
-        self,
-        portfolio_return: float,
-        asset_returns: np.ndarray,
-        turnover: float,
-        drawdown: float,
-        port_vol: float,
-        row: pd.Series,
-    ) -> tuple:
-        """
-        V8-5 PPO reward (safe_reward=False):
-            portfolio_return
-          + 0.5 × (portfolio_return − momentum_return)
-          − 0.0025 × turnover
-
-        V8-6 Safe PPO reward (safe_reward=True):
-          market_return >= 0  → same as PPO
-          market_return <  0  → 0.5 × portfolio_return − 2 × vol − 3 × drawdown
-
-        Returns (reward_float, components_dict)
-        """
-        momentum_ret = self._momentum_return(row)
-        excess       = portfolio_return - momentum_ret
-        turn_pen     = TURNOVER_PEN * turnover
-
-        # Determine market direction (SPY return, fallback to avg)
-        market_ret = self._safe_val(row, SPY_RETURN_COL,
-                                    default=float(np.mean(asset_returns)))
-
-        in_bear_mode = self.safe_reward and (market_ret < 0)
-
-        if in_bear_mode:
-            reward = (
-                BEAR_BASE_SCALE * portfolio_return
-                - BEAR_VOL_PEN  * port_vol
-                - BEAR_DD_PEN   * drawdown
-            )
-            comps = {
-                "mode":       "bear",
-                "base":       BEAR_BASE_SCALE * portfolio_return,
-                "vol_pen":    BEAR_VOL_PEN * port_vol,
-                "dd_pen":     BEAR_DD_PEN  * drawdown,
-                "market_ret": market_ret,
-            }
+        # R1: regime features — regime already in {-1,0,1}, trend & vol z-scored
+        if self._has_regime:
+            regime_raw  = float(row.get("regime", 0))
+            trend_raw   = float(row.get("trend_strength", 0.0))
+            vol_raw     = float(row.get("market_volatility", 0.0))
+            trend_norm  = self._normalise("trend_strength", trend_raw)
+            vol_norm    = self._normalise("market_volatility", vol_raw)
+            regime_obs  = [regime_raw, trend_norm, vol_norm]
         else:
-            reward = portfolio_return + MOM_ALPHA * excess - turn_pen
-            comps  = {
-                "mode":        "alpha",
-                "base":        portfolio_return,
-                "excess":      MOM_ALPHA * excess,
-                "turn_pen":    turn_pen,
-                "market_ret":  market_ret,
-            }
+            regime_obs  = [0.0, 0.0, 0.0]
 
-        return float(reward), comps
+        obs = np.array(market_obs + portfolio_obs + regime_obs, dtype=np.float32)
+        return np.clip(obs, -10.0, 10.0)
 
-    # ── Gym API ────────────────────────────────────────────────────────────────
+    # ── Risk metrics ──────────────────────────────────────────────────────────
+
+    def _compute_drawdown(self):
+        if self.peak_value <= 0:
+            return 0.0
+        return float((self.peak_value - self.portfolio_value) / self.peak_value)
+
+    def _compute_cvar(self):
+        if len(self.return_history) < max(self.cvar_window, 5):
+            return 0.0
+        recent = np.array(self.return_history[-self.cvar_window:])
+        var    = np.percentile(recent, self.cvar_alpha * 100)
+        tail   = recent[recent <= var]
+        return float(tail.mean()) if len(tail) > 0 else float(var)
+
+    def _compute_portfolio_vol(self):
+        if len(self.return_history) < 5:
+            return 0.0
+        return float(np.array(self.return_history[-self.cvar_window:]).std())
+
+    def _compute_tail_cvar(self):
+        """R5: CVaR over rolling 50-step return buffer (10th percentile tail)."""
+        if len(self.tail_risk_buf) < 10:
+            return 0.0
+        arr  = np.array(self.tail_risk_buf)
+        n_tail = max(1, int(0.10 * len(arr)))
+        worst  = np.sort(arr)[:n_tail]
+        return float(np.abs(worst.mean()))
+
+    def _get_current_regime(self, step):
+        """Return integer regime {-1, 0, 1} at the current step."""
+        if self._has_regime:
+            val = self.df.iloc[step].get("regime", 0)
+            return int(val) if not pd.isna(val) else 0
+        return 0
+
+    # ── Gym API ───────────────────────────────────────────────────────────────
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
 
         max_start = max(0, self.total_rows - MIN_EPISODE_STEPS - 1)
         if self.random_start and max_start > 0:
-            # With 30 % probability bias toward hard-start windows (V9-2)
-            if self._hard_starts and self.np_random.random() < 0.30:
-                candidate = int(self.np_random.choice(self._hard_starts))
-                self.episode_start = min(candidate, max_start)
-            else:
-                self.episode_start = int(self.np_random.integers(0, max_start))
+            self.episode_start = int(self.np_random.integers(0, max_start))
         else:
             self.episode_start = 0
 
@@ -410,155 +316,147 @@ class PortfolioTradingEnv(gym.Env):
         if not hasattr(self, "_total_steps"):
             self._total_steps = 0
 
-        self._ep_ret_buf  = []
-        self._ep_dd_buf   = []
-        self._ep_vol_buf  = []
-        self._ep_turn_buf = []
+        # R7: episode regime counter for debug logging
+        self._ep_regime_counts = {-1: 0, 0: 0, 1: 0}
 
-        return self._get_obs(self.df.iloc[self.current_step]), {}
+        return self._get_obs(self.current_step), {}
 
     def step(self, action):
         action = np.array(action, dtype=np.float32)
         self._total_steps += 1
 
-        # ── New weights (no smoothing, V8-3) ───────────────────────────────────
-        new_weights = self._process_weights(action)
-        turnover    = float(np.abs(new_weights - self.weights).sum())
-        txn_cost    = self.transaction_cost * turnover
+        # ── Rebalance gate ────────────────────────────────────────────────────
+        steps_since_start = self.current_step - self.episode_start
+        if steps_since_start % self.rebalance_freq == 0:
+            new_weights = self._process_weights(action, self.weights, apply_smoothing=True)
+        else:
+            new_weights = self.weights.copy()
+
+        # ── Transaction cost ──────────────────────────────────────────────────
+        turnover = float(np.abs(new_weights - self.weights).sum())
+        txn_cost = self.transaction_cost * turnover
         self.weights = new_weights
 
-        # ── Asset returns (look ahead: next row materialises) ──────────────────
-        next_index   = min(self.current_step + 1, self.total_rows - 1)
-        row_obs      = self.df.iloc[self.current_step]
-        row_return   = self.df.iloc[next_index]
-
+        # ── Asset returns ─────────────────────────────────────────────────────
+        row = self.df.iloc[self.current_step]
         asset_returns = np.array(
-            [self._safe_val(row_return, c) for c in self.return_cols],
+            [float(row.get(col, 0.0) or 0.0) for col in self.return_cols],
             dtype=np.float64,
         )
-
+        asset_returns    = np.where(np.isfinite(asset_returns), asset_returns, 0.0)
         portfolio_return = float(np.dot(self.weights, asset_returns))
         net_return       = portfolio_return - txn_cost
 
-        # ── Portfolio update ───────────────────────────────────────────────────
-        self.portfolio_value = max(
-            self.portfolio_value * (1.0 + net_return), 1e-6
-        )
+        # ── Portfolio update ──────────────────────────────────────────────────
+        self.portfolio_value = max(self.portfolio_value * (1.0 + net_return), 1e-6)
         if self.portfolio_value > self.peak_value:
             self.peak_value = self.portfolio_value
 
         self.return_history.append(net_return)
         self.tail_risk_buf.append(net_return)
 
-        # ── Risk metrics ───────────────────────────────────────────────────────
-        drawdown  = self._compute_drawdown()
-        port_vol  = self._compute_portfolio_vol()
-        cvar      = self._compute_cvar()
-        tail_cvar = self._compute_tail_cvar()
+        # ── Risk metrics ──────────────────────────────────────────────────────
+        drawdown    = self._compute_drawdown()
+        cvar        = self._compute_cvar()
+        port_vol    = self._compute_portfolio_vol()
+        tail_cvar   = self._compute_tail_cvar()     # R5
+        regime      = self._get_current_regime(self.current_step)
 
-        # ── Reward (V8) ────────────────────────────────────────────────────────
-        reward, comps = self._compute_reward(
-            portfolio_return=portfolio_return,
-            asset_returns=asset_returns,
-            turnover=turnover,
-            drawdown=drawdown,
-            port_vol=port_vol,
-            row=row_obs,
-        )
+        # R7: track regime counts for debug
+        if hasattr(self, "_ep_regime_counts"):
+            self._ep_regime_counts[regime] = self._ep_regime_counts.get(regime, 0) + 1
 
-        # ── Debug tracking ─────────────────────────────────────────────────────
-        self._ep_ret_buf.append(net_return)
-        self._ep_dd_buf.append(drawdown)
-        self._ep_vol_buf.append(port_vol)
-        self._ep_turn_buf.append(turnover)
+        # ── Reward ────────────────────────────────────────────────────────────
+        turn_pen = self.turnover_lambda * turnover
+        reward   = net_return - turn_pen
 
-        if self.debug_reward:
-            mode = comps.get("mode", "?")
-            if mode == "bear":
-                print(
-                    f"[DBG] BEAR  ret={net_return:+.5f}  "
-                    f"base={comps['base']:+.5f}  "
-                    f"vol={comps['vol_pen']:.5f}  "
-                    f"dd={comps['dd_pen']:.5f}  "
-                    f"mkt={comps['market_ret']:+.5f}  r={reward:+.5f}"
-                )
+        if self.safe_reward:
+            # R3: regime-conditional risk multiplier
+            risk_mult = REGIME_RISK_MULTIPLIER.get(regime, 0.5)
+
+            # Penalties with max() guards
+            dd_penalty   = self.lambda_dd   * max(0.0, drawdown - self.dd_threshold)
+            cvar_penalty = self.lambda_cvar * max(0.0, -(cvar + self.cvar_threshold))
+            vol_penalty  = self.lambda_vol  * port_vol
+
+            # Gradual warm-up over 200k steps
+            warmup_scale  = min(1.0, self._total_steps / 200_000)
+            penalty_scale = warmup_scale * self.risk_penalty_scale * risk_mult
+
+            # R5: tail CVaR penalty (not regime-gated — always small)
+            tail_pen = 0.05 * tail_cvar
+
+            # R4: exposure bonus during bull markets
+            portfolio_exposure = float(np.sum(np.abs(self.weights)))
+            if regime == 1:
+                exposure_bonus = BULL_EXPOSURE_BONUS * portfolio_exposure
             else:
+                exposure_bonus = 0.0
+
+            risk_penalty = penalty_scale * (dd_penalty + cvar_penalty + vol_penalty)
+            reward       = (net_return
+                            + exposure_bonus
+                            - turn_pen
+                            - risk_penalty
+                            - tail_pen)
+
+            # R7: optional debug print
+            if self.debug_reward:
                 print(
-                    f"[DBG] ALPHA  ret={net_return:+.5f}  "
-                    f"base={comps['base']:+.5f}  "
-                    f"exc={comps['excess']:+.5f}  "
-                    f"turn={comps['turn_pen']:.5f}  "
-                    f"mkt={comps['market_ret']:+.5f}  r={reward:+.5f}"
+                    f"[DBG] ret={net_return:+.5f}  "
+                    f"regime={regime:+d}  risk_mult={risk_mult:.1f}  "
+                    f"turn={turn_pen:.5f}  dd={dd_penalty:.5f}  "
+                    f"cvar={cvar_penalty:.5f}  vol={vol_penalty:.5f}  "
+                    f"tail={tail_pen:.5f}  exp_bonus={exposure_bonus:.5f}  "
+                    f"scale={penalty_scale:.4f}"
                 )
 
-        # ── Advance ────────────────────────────────────────────────────────────
+        # Scale *100 — no clipping (preserves gradient signal)
+        reward = float(reward * 100.0)
+
+        # ── Advance ───────────────────────────────────────────────────────────
         self.current_step += 1
         end_step = self.episode_start + MIN_EPISODE_STEPS
         done     = self.current_step >= min(end_step, self.total_rows - 1)
 
-        next_obs = self._get_obs(self.df.iloc[next_index])
+        next_step = min(self.current_step, self.total_rows - 1)
+        next_obs  = self._get_obs(next_step)
 
         info = {
-            "portfolio_value":   self.portfolio_value,
-            "portfolio_return":  portfolio_return,
-            "net_return":        net_return,
-            "drawdown":          drawdown,
-            "cvar":              cvar,
-            "tail_cvar":         tail_cvar,
-            "volatility":        port_vol,
-            "turnover":          turnover,
-            "transaction_cost":  txn_cost,
-            "weights":           self.weights.tolist(),
-            "reward_mode":       comps.get("mode"),
-            "reward_components": comps,
-            "episode_start":     self.episode_start,
-            # Provide regime=0 always so evaluate_agent.py doesn't break
-            "regime":            0,
+            "portfolio_value":  self.portfolio_value,
+            "portfolio_return": portfolio_return,
+            "net_return":       net_return,
+            "drawdown":         drawdown,
+            "cvar":             cvar,
+            "tail_cvar":        tail_cvar,
+            "volatility":       port_vol,
+            "turnover":         turnover,
+            "transaction_cost": txn_cost,
+            "weights":          self.weights.tolist(),
+            "regime":           regime,
         }
 
-        return next_obs, float(reward), done, False, info
-
-    # ── Hard-start injection (V9-2 / Paper 5) ─────────────────────────────────
-
-    def set_hard_starts(self, indices: list) -> None:
-        """Store episode-start row indices that correspond to high-drawdown windows.
-
-        Called by ScenarioSamplerCallback via env_method().  reset() samples
-        from these with 30 % probability when random_start=True.
-        """
-        valid = [i for i in indices if 0 <= i < max(0, self.total_rows - MIN_EPISODE_STEPS - 1)]
-        self._hard_starts = valid
-
-    # ── Debug log ──────────────────────────────────────────────────────────────
-
-    def get_episode_debug_log(self) -> str:
-        if not self._ep_ret_buf:
-            return ""
-        return (
-            f"avg_ret={np.mean(self._ep_ret_buf):+.5f}  "
-            f"avg_dd={np.mean(self._ep_dd_buf):.5f}  "
-            f"avg_vol={np.mean(self._ep_vol_buf):.5f}  "
-            f"avg_turn={np.mean(self._ep_turn_buf):.5f}"
-        )
-
-    # ── Render ─────────────────────────────────────────────────────────────────
+        return next_obs, reward, done, False, info
 
     def render(self):
-        dd   = self._compute_drawdown()
-        cvar = self._compute_cvar()
-        mode = "SAFE" if self.safe_reward else "PPO"
+        dd      = self._compute_drawdown()
+        cvar    = self._compute_cvar()
+        regime  = self._get_current_regime(max(0, self.current_step - 1))
+        labels  = {1: "BULL", 0: "NEUT", -1: "BEAR"}
         print(
             f"Step {self.current_step:4d} | "
             f"Value: ${self.portfolio_value:>12,.2f} | "
             f"DD: {dd*100:5.2f}% | CVaR: {cvar*100:6.2f}% | "
-            f"Mode: {mode} | "
+            f"Regime: {labels.get(regime,'?')} | "
             f"W: {[f'{w:.2f}' for w in self.weights]}"
         )
 
 
-# ── Factory ────────────────────────────────────────────────────────────────────
+# ── Factory ───────────────────────────────────────────────────────────────────
 
-def make_env(data_path: str, safe_reward: bool = False, **kwargs) -> PortfolioTradingEnv:
-    """Load CSV and return configured env. No regime features needed."""
+def make_env(data_path, safe_reward=False, **kwargs):
+    """Load CSV, attach regime features, return configured env."""
+    from data_pipeline.regime_detection import detect_market_regime
     df = pd.read_csv(data_path, index_col="Date", parse_dates=True)
+    df = detect_market_regime(df)
     return PortfolioTradingEnv(df, safe_reward=safe_reward, **kwargs)

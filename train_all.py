@@ -1,24 +1,21 @@
 """
-train_all.py  (v3 — Risk-Aware Pipeline)
------------------------------------------
-Master orchestration script.
-
-Pipeline order:
-  1. data_pipeline/build_dataset.py       — build / rebuild dataset
-  2. data_pipeline/validate_dataset.py    — sanity check
-  3. agents/train_ppo_risk_aware.py       — Hierarchical PPO  (safe_reward=False)
-  4. agents/train_ppo_risk_aware.py       — Safe Hierarchical PPO  (safe_reward=True)
-  5. agents/train_dqn_risk_aware.py       — Distributional DQN with hierarchical action filter
-  6. evaluation/evaluate_agent.py         — benchmark all agents on test data
+train_all.py
+------------
+Master training script — trains DQN, PPO, and Safe PPO in one command.
 
 Usage
 -----
-    python train_all.py                              # full pipeline
-    python train_all.py --skip-build                 # skip dataset rebuild
-    python train_all.py --agents hier_ppo            # train only Hier-PPO
-    python train_all.py --agents hier_ppo safe_hier_ppo  # train both PPO variants
-    python train_all.py --skip-existing              # skip already-trained models
-    python train_all.py --no-eval                    # skip final evaluation
+    # Train all three agents sequentially (safest, works on any machine)
+    python train_all.py
+
+    # Train sequentially but skip already-trained models
+    python train_all.py --skip-existing
+
+    # Train only specific agents
+    python train_all.py --skip-existing
+
+    # Run evaluate_agent.py automatically after training completes
+    python train_all.py --evaluate
 
 Part of: Safe RL for Risk-Constrained Portfolio Management
 """
@@ -27,225 +24,212 @@ import os
 import sys
 import time
 import argparse
+import subprocess
 import importlib
 from datetime import timedelta
 
+# ── Path setup ────────────────────────────────────────────────────────────────
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, PROJECT_ROOT)
 
-# ── Logging ───────────────────────────────────────────────────────────────────
-LOG_FILE = os.path.join(PROJECT_ROOT, "logs", "training_log.txt")
-
-def log(msg: str) -> None:
-    print(msg)
-    os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
-    with open(LOG_FILE, "a", encoding="utf-8") as f:
-        f.write(msg + "\n")
-
 # ── Agent registry ────────────────────────────────────────────────────────────
+# Each entry: display name, module path, entry function, saved model filename
 AGENTS = {
-    "hier_ppo": {
-        "label":      "Hier-PPO (Alpha v6)",
-        "module":     "agents.train_ppo_risk_aware",
-        "fn":         "train_ppo_risk_aware",
+    "dqn": {
+        "label":      "DQN (Baseline)",
+        "module":     "agents.train_dqn",
+        "fn":         "train_dqn",
+        "model_file": "models/dqn_portfolio.zip",
+    },
+    "ppo": {
+        "label":      "PPO (Baseline)",
+        "module":     "agents.train_ppo",
+        "fn":         "train_ppo",
         "fn_kwargs":  {"safe_reward": False},
-        "model_file": "models/hier_ppo_portfolio.zip",
+        "model_file": "models/ppo_portfolio.zip",
     },
-    "safe_hier_ppo": {
-        "label":      "Safe-Hier-PPO (Risk-Aware v6)",
-        "module":     "agents.train_ppo_risk_aware",
-        "fn":         "train_ppo_risk_aware",
-        "fn_kwargs":  {"safe_reward": True},
-        "model_file": "models/safe_hier_ppo_portfolio.zip",
-    },
-    "dqn_risk_aware": {
-        "label":      "DQN Risk-Aware (Dist. v6)",
-        "module":     "agents.train_dqn_risk_aware",
-        "fn":         "train_dqn_risk_aware",
-        "fn_kwargs":  {},
-        "model_file": "models/dqn_risk_aware_portfolio.zip",
+    "safe_ppo": {
+        "label":      "Safe PPO (Risk-Aware)",
+        "module":     "agents.train_safe_ppo",
+        "fn":         "train_safe_ppo",
+        "model_file": "models/safe_ppo_portfolio.zip",
     },
 }
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _fmt(s: float) -> str:
-    return str(timedelta(seconds=int(s)))
+def _fmt_duration(seconds: float) -> str:
+    """Format elapsed seconds as a human-readable string."""
+    return str(timedelta(seconds=int(seconds)))
 
 
-def _model_exists(key: str) -> bool:
-    return os.path.isfile(os.path.join(PROJECT_ROOT, AGENTS[key]["model_file"]))
+def _model_exists(agent_key: str) -> bool:
+    path = os.path.join(PROJECT_ROOT, AGENTS[agent_key]["model_file"])
+    return os.path.isfile(path)
 
 
-def _sep(char="═", n=62) -> str:
-    return char * n
+def _print_header(text: str) -> None:
+    sep = "═" * 60
+    print(f"\n{sep}")
+    print(f"  {text}")
+    print(f"{sep}\n")
 
 
-# ── Step runners ──────────────────────────────────────────────────────────────
+def _print_section(text: str) -> None:
+    print(f"\n{'─' * 60}")
+    print(f"  {text}")
+    print(f"{'─' * 60}\n")
 
-def run_build_dataset() -> bool:
-    log(f"\n{_sep()}")
-    log("  Step 1/2: Building dataset …")
-    log(_sep())
-    t0 = time.time()
+
+# ── Training runner ───────────────────────────────────────────────────────────
+
+def run_agent(agent_key: str, cfg: dict) -> tuple[bool, float]:
+    """
+    Import and call the training function for one agent in-process.
+
+    Returns (success: bool, elapsed_seconds: float).
+    """
+    _print_section(f"Training: {cfg['label']}")
+
+    t_start = time.time()
     try:
-        m = importlib.import_module("data_pipeline.build_dataset")
-        m.build_full_pipeline(use_cached_raw=False)
-        log(f"  ✓  Dataset built  ({_fmt(time.time()-t0)})")
-        return True
-    except Exception as exc:
-        log(f"  ✗  Dataset build FAILED: {exc}")
-        import traceback; traceback.print_exc()
-        return False
-
-
-def run_validate_dataset() -> bool:
-    log(f"\n{_sep()}")
-    log("  Step 2/2: Validating dataset …")
-    log(_sep())
-    try:
-        m  = importlib.import_module("data_pipeline.validate_dataset")
-        ok = m.main()
-        status = "✓  Validation passed" if ok else "⚠  Validation warnings (check log)"
-        log(f"  {status}")
-        return True
-    except Exception as exc:
-        log(f"  ⚠  Validation error: {exc}")
-        return True   # non-fatal
-
-
-def run_agent(key: str) -> tuple:
-    cfg = AGENTS[key]
-    log(f"\n{_sep('-')}")
-    log(f"  Training: {cfg['label']}")
-    log(_sep("-"))
-    t0 = time.time()
-    try:
-        m       = importlib.import_module(cfg["module"])
-        fn      = getattr(m, cfg["fn"])
-        fn(**cfg.get("fn_kwargs", {}))
-        elapsed = time.time() - t0
-        log(f"  ✓  {cfg['label']} finished  ({_fmt(elapsed)})")
+        module   = importlib.import_module(cfg["module"])
+        fn       = getattr(module, cfg["fn"])
+        kwargs   = cfg.get("fn_kwargs", {})
+        fn(**kwargs)
+        elapsed  = time.time() - t_start
+        print(f"\n  ✓  {cfg['label']} finished in {_fmt_duration(elapsed)}")
         return True, elapsed
+
     except Exception as exc:
-        elapsed = time.time() - t0
-        log(f"  ✗  {cfg['label']} FAILED: {exc}  ({_fmt(elapsed)})")
-        import traceback; traceback.print_exc()
+        elapsed = time.time() - t_start
+        print(f"\n  ✗  {cfg['label']} FAILED after {_fmt_duration(elapsed)}")
+        print(f"     Error: {exc}")
+        import traceback
+        traceback.print_exc()
         return False, elapsed
-
-
-def run_evaluation(agent_keys: list) -> None:
-    log(f"\n{_sep()}")
-    log("  Final step: Evaluating agents …")
-    log(_sep())
-    try:
-        m = importlib.import_module("evaluation.evaluate_agent")
-        m.evaluate_all(agent_keys=agent_keys)
-    except Exception as exc:
-        log(f"  ⚠  Evaluation error: {exc}")
-        import traceback; traceback.print_exc()
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-def main(
-    agent_keys: list,
-    skip_build: bool = False,
+def train_all(
+    agent_keys: list[str],
     skip_existing: bool = False,
-    run_eval: bool = True,
+    run_eval: bool = False,
 ) -> None:
-    os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
-    with open(LOG_FILE, "w", encoding="utf-8") as f:
-        f.write("")
+    """
+    Train the specified agents one after another.
 
-    wall_start = time.time()
+    Parameters
+    ----------
+    agent_keys    : Which agents to train (ordered list).
+    skip_existing : Skip agents whose model file already exists on disk.
+    run_eval      : If True, run evaluate_agent.py after all training completes.
+    """
+    _print_header("SAFE RL PORTFOLIO MANAGEMENT — MASTER TRAINING SCRIPT")
 
-    log(_sep())
-    log("  SAFE RL PORTFOLIO — FULL PIPELINE  (v3 Risk-Aware)")
-    log(_sep())
+    # ── Pre-flight: check data files exist ───────────────────────────────────
+    train_csv = os.path.join(PROJECT_ROOT, "data", "train_dataset.csv")
+    test_csv  = os.path.join(PROJECT_ROOT, "data", "test_dataset.csv")
 
-    # ── Device check ──────────────────────────────────────────────────────────
+    for path, label in [(train_csv, "train_dataset.csv"), (test_csv, "test_dataset.csv")]:
+        if not os.path.isfile(path):
+            print(f"  ✗  MISSING: {path}")
+            print(f"     Run 'python data_pipeline/build_dataset.py' first.\n")
+            sys.exit(1)
+    print(f"  ✓  data/train_dataset.csv found")
+    print(f"  ✓  data/test_dataset.csv  found\n")
+
+    # ── Detect device ─────────────────────────────────────────────────────────
     try:
         import torch
-        if torch.cuda.is_available():
-            log(f"  ⚡  GPU: {torch.cuda.get_device_name(0)}")
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        if device == "cuda":
+            gpu_name = torch.cuda.get_device_name(0)
+            print(f"  ⚡  GPU detected: {gpu_name}")
         else:
-            log("  💻  CPU training (no GPU detected)")
+            print(f"  💻  No GPU detected — training on CPU")
+            print(f"      (Install CUDA PyTorch for ~5x speedup on RTX 4050)")
     except ImportError:
-        log("  ⚠   torch not importable — SB3 will manage device")
+        device = "cpu"
+        print("  ⚠   PyTorch not importable directly — SB3 will handle device selection")
 
-    # ── Steps 1-2: Dataset ────────────────────────────────────────────────────
-    if skip_build:
-        log("\n  Skipping dataset build (--skip-build).")
-        train_csv = os.path.join(PROJECT_ROOT, "data", "train_dataset.csv")
-        test_csv  = os.path.join(PROJECT_ROOT, "data", "test_dataset.csv")
-        for p, lbl in [(train_csv, "train_dataset.csv"),
-                       (test_csv,  "test_dataset.csv")]:
-            if not os.path.isfile(p):
-                log(f"  ✗  MISSING: {p} — run without --skip-build first.")
-                sys.exit(1)
-    else:
-        if not run_build_dataset():
-            log("Aborting: dataset build failed.")
-            sys.exit(1)
-        run_validate_dataset()
+    print()
 
-    # ── Steps 3-5: Train agents ───────────────────────────────────────────────
-    to_train = []
-    skipped  = []
+    # ── Plan which agents to run ──────────────────────────────────────────────
+    to_train: list[str] = []
+    skipped:  list[str] = []
+
     for key in agent_keys:
         if key not in AGENTS:
-            log(f"  ⚠  Unknown agent '{key}' — skipping.")
+            print(f"  ⚠   Unknown agent '{key}' — skipping.")
             continue
         if skip_existing and _model_exists(key):
             skipped.append(key)
-            log(f"  ~  {AGENTS[key]['label']:<35} already trained — skipping")
+            print(f"  ~   {AGENTS[key]['label']:<30} model already exists — skipping (--skip-existing)")
         else:
             to_train.append(key)
 
-    results = {}
+    if not to_train:
+        print("\n  Nothing to train. All models already exist.")
+        print("  Remove --skip-existing or delete model files to retrain.\n")
+        return
+
+    print(f"\n  Agents to train : {[AGENTS[k]['label'] for k in to_train]}")
+    if skipped:
+        print(f"  Agents skipped  : {[AGENTS[k]['label'] for k in skipped]}")
+    print()
+
+    # ── Train sequentially ────────────────────────────────────────────────────
+    wall_start    = time.time()
+    results:  dict[str, tuple[bool, float]] = {}
+
     for key in to_train:
-        ok, elapsed = run_agent(key)
-        results[key] = (ok, elapsed)
+        success, elapsed = run_agent(key, AGENTS[key])
+        results[key] = (success, elapsed)
+
+    total_elapsed = time.time() - wall_start
 
     # ── Summary ───────────────────────────────────────────────────────────────
-    log(f"\n{_sep()}")
-    log("  TRAINING SUMMARY")
-    log(_sep())
-    all_ok = True
+    _print_header("TRAINING SUMMARY")
+
+    all_passed = True
     for key in to_train:
-        ok, elapsed = results[key]
-        status = "✓ Done  " if ok else "✗ FAILED"
-        if not ok:
-            all_ok = False
-        log(f"  {status}  {AGENTS[key]['label']:<35}  {_fmt(elapsed)}")
+        success, elapsed = results[key]
+        status = "✓  Done   " if success else "✗  FAILED "
+        if not success:
+            all_passed = False
+        print(f"  {status}  {AGENTS[key]['label']:<30}  {_fmt_duration(elapsed)}")
+
     for key in skipped:
-        log(f"  ~ Skip   {AGENTS[key]['label']:<35}  (model existed)")
-    log(f"\n  Total wall time: {_fmt(time.time() - wall_start)}")
+        print(f"  ~  Skipped  {AGENTS[key]['label']:<30}  (model existed)")
 
-    # ── Step 6: Evaluate ──────────────────────────────────────────────────────
+    print(f"\n  Total wall time : {_fmt_duration(total_elapsed)}")
+    print()
+
+    # ── Optional evaluation ───────────────────────────────────────────────────
     if run_eval:
-        if all_ok:
-            run_evaluation(to_train + skipped)
+        if all_passed:
+            _print_section("Running evaluation …")
+            eval_module = importlib.import_module("evaluation.evaluate_agent")
+            eval_module.evaluate_all()
         else:
-            log("  ⚠   Skipping evaluation — one or more agents failed.")
+            print("  ⚠   Skipping evaluation — one or more agents failed to train.")
 
-    if all_ok:
-        log("\n  All steps completed successfully.\n")
+    if all_passed:
+        print("  All agents trained successfully.\n")
     else:
         failed = [k for k in to_train if not results[k][0]]
-        log(f"\n  ✗  Failed: {failed}\n")
+        print(f"  ✗  Failed agents: {failed}\n")
         sys.exit(1)
-
-    log(f"  Log saved → {LOG_FILE}\n")
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Run the full Safe RL portfolio pipeline (v3 risk-aware agents).",
+        description="Train all Safe RL portfolio agents in one command.",
         formatter_class=argparse.RawTextHelpFormatter,
     )
     parser.add_argument(
@@ -255,35 +239,28 @@ if __name__ == "__main__":
         choices=list(AGENTS.keys()),
         metavar="AGENT",
         help=(
-            "Agents to train (default: all).\n"
-            "  hier_ppo        — Hierarchical PPO (multi-objective reward)\n"
-            "  safe_hier_ppo   — Safe Hierarchical PPO (Lagrangian constraint)\n"
-            "  dqn_risk_aware  — Distributional DQN with hierarchical action filter"
+            "Which agents to train. Choose from: dqn, ppo, safe_ppo\n"
+            "Default: all three.\n"
+            "Example: --agents ppo safe_ppo"
         ),
-    )
-    parser.add_argument(
-        "--build",
-        action="store_true",
-        default=False,
-        help="Rebuild dataset before training agents (default: skip dataset).",
     )
     parser.add_argument(
         "--skip-existing",
         action="store_true",
         default=False,
-        help="Skip agents whose model file already exists.",
+        help="Skip agents whose .zip model file already exists in models/.",
     )
     parser.add_argument(
-        "--no-eval",
+        "--evaluate",
         action="store_true",
         default=False,
-        help="Skip final evaluation step.",
+        help="Run evaluate_agent.py automatically after training completes.",
     )
+
     args = parser.parse_args()
 
-    main(
+    train_all(
         agent_keys    = args.agents,
-        skip_build    = not args.build,
         skip_existing = args.skip_existing,
-        run_eval      = not args.no_eval,
+        run_eval      = args.evaluate,
     )
