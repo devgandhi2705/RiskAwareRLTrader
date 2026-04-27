@@ -1,3 +1,6 @@
+# Project-specific
+verify_gpu.py
+
 # Python
 __pycache__/
 *.py[cod]
@@ -64,6 +67,3 @@ htmlcov/
 
 # Ruff / Black
 .ruff_cache/
-
-#other 
-verify_gpu.py
