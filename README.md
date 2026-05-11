@@ -4,6 +4,12 @@ An AI portfolio manager that uses reinforcement learning to allocate capital acr
 
 ---
 
+## 🚀 Live Demo
+
+**Try the deployed app:** https://devg-01-riskawarerltrader.hf.space/landing
+
+---
+
 ## Goal
 
 Build an AI system that:
